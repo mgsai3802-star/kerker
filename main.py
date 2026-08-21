@@ -89,70 +89,84 @@ def handle_document(message):
             bot.reply_to(message, "⚠️ ကျေးဇူးပြု၍ `.zip` သို့မဟုတ် `.txt` ဖိုင်ကိုသာ တင်ပေးပါ။")
             return
         
-        bot.reply_to(message, "⏳ ဖိုင်ကို ဖတ်နေပါသည်... ခဏစောင့်ပါ။")
+        # Loading စာသား ပို့ထားမည်
+        msg = bot.reply_to(message, "⏳ ဖိုင်ကို ဖတ်နေပါသည်... Database သို့ တစ်ခါတည်း ထည့်သွင်းနေပါပြီ။ ခဏစောင့်ပါ။")
         
-        # Telegram Server မှ ဖိုင်ကို ဒေါင်းလုဒ်ဆွဲခြင်း
         file_info = bot.get_file(message.document.file_id)
         downloaded_file = bot.download_file(file_info.file_path)
         
-        cookies_added = 0
+        all_cookies = []
         
-        # ZIP ဖိုင်ဖြစ်လျှင်
+        # ZIP (သို့) TXT ဖတ်ပြီး Array ထဲ စုထည့်မည်
         if file_name.endswith('.zip'):
             with zipfile.ZipFile(io.BytesIO(downloaded_file)) as z:
                 for name in z.namelist():
-                    if name.endswith('.txt'): # ZIP ထဲမှ .txt ဖိုင်များကို ရှာဖတ်မည်
-                        content = z.read(name).decode('utf-8')
+                    if name.endswith('.txt'):
+                        content = z.read(name).decode('utf-8', errors='ignore') 
                         lines = [line.strip() for line in content.split('\n') if line.strip()]
-                        for cookie in lines:
-                            supabase.table("cookies_pool").insert({"cookie_value": cookie}).execute()
-                            cookies_added += 1
-                            
-        # TXT ဖိုင်ဖြစ်လျှင်
+                        all_cookies.extend(lines)
+                        
         elif file_name.endswith('.txt'):
-            content = downloaded_file.decode('utf-8')
+            content = downloaded_file.decode('utf-8', errors='ignore')
             lines = [line.strip() for line in content.split('\n') if line.strip()]
-            for cookie in lines:
-                supabase.table("cookies_pool").insert({"cookie_value": cookie}).execute()
-                cookies_added += 1
-                
-        if cookies_added > 0:
-            bot.reply_to(message, f"✅ အောင်မြင်ပါသည်။ Cookie အသစ် ({cookies_added}) ခုကို Database သို့ ထည့်သွင်းပြီးပါပြီ။")
-        else:
-            bot.reply_to(message, "⚠️ ဖိုင်ထဲတွင် Cookie စာသားများ မတွေ့ရှိပါ။")
+            all_cookies.extend(lines)
+            
+        # Cookie တစ်ခုမှ မရှိလျှင်
+        if not all_cookies:
+            bot.edit_message_text("⚠️ ဖိုင်ထဲတွင် Cookie စာသားများ မတွေ့ရှိပါ။", chat_id=message.chat.id, message_id=msg.message_id)
+            return
+
+        # Bulk Insert ဖြင့် ၅၀၀ စီခွဲ၍ Supabase သို့ အမြန်သွင်းမည်
+        insert_data = [{"cookie_value": c} for c in all_cookies]
+        chunk_size = 500 
+        
+        for i in range(0, len(insert_data), chunk_size):
+            chunk = insert_data[i:i + chunk_size]
+            supabase.table("cookies_pool").insert(chunk).execute()
+            
+        bot.edit_message_text(f"✅ အောင်မြင်ပါသည်။ Cookie အသစ် ({len(all_cookies)}) ခုကို Database သို့ ထည့်သွင်းပြီးပါပြီ။", chat_id=message.chat.id, message_id=msg.message_id)
             
     except Exception as e:
         bot.reply_to(message, f"❌ ဖိုင်ဖတ်ရာတွင် အမှားဖြစ်နေပါသည်: {e}")
 
+# ==========================================
+# (ပြင်ဆင်ထားသော အကောင့်ယူမည် အပိုင်း)
+# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
     try:
+        # ခလုတ်နှိပ်လိုက်သည်နှင့် Loading မလည်နေစေရန် အရင်တုံ့ပြန်ပါမည်
+        bot.answer_callback_query(call.id, "⏳ အကောင့် ထုတ်ယူနေပါသည်...")
+        
         res = supabase.table("cookies_pool").select("cookie_value").execute()
         cookies_list = res.data
         
         if not cookies_list:
-            bot.answer_callback_query(call.id, "⚠️ လက်ရှိတွင် အသုံးပြုနိုင်သော Cookie မရှိသေးပါ။", show_alert=True)
+            bot.send_message(call.message.chat.id, "⚠️ လက်ရှိတွင် အသုံးပြုနိုင်သော Cookie မရှိသေးပါ။")
             return
             
         selected_cookie = random.choice(cookies_list)['cookie_value']
         token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
         
+        # Sessions Table သို့ သိမ်းခြင်း
         supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
         
-        # PROXY_DOMAIN တွင် အနောက်ဆုံးမှ '/' ပါနေပါက ဖြုတ်ထုတ်မည်
         clean_domain = PROXY_DOMAIN.rstrip("/")
         magic_link = f"{clean_domain}/login?token={token}"
         
+        # HTML ဖော်မတ်ကို ပြောင်းသုံးထားပါသည်
         text = (
             "🎉 သင့်အတွက် အကောင့် အဆင်သင့်ဖြစ်ပါပြီ။\n\n"
-            "အောက်ပါ Link ကို နှိပ်၍ **Chrome** ဖြင့် ဖွင့်ပြီး အသုံးပြုနိုင်ပါပြီ:\n"
+            "အောက်ပါ Link ကို နှိပ်၍ <b>Chrome</b> ဖြင့် ဖွင့်ပြီး အသုံးပြုနိုင်ပါပြီ:\n"
             f"{magic_link}\n\n"
-            "*(လုံခြုံရေးအရ ဤ Link ကို အခြားသူများအား မျှဝေခြင်း မပြုပါနှင့်)*"
+            "<i>(လုံခြုံရေးအရ ဤ Link ကို အခြားသူများအား မျှဝေခြင်း မပြုပါနှင့်)</i>"
         )
-        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="Markdown")
+        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
         
     except Exception as e:
-        bot.answer_callback_query(call.id, f"❌ အမှားအယွင်း ဖြစ်ပေါ်နေပါသည်: {e}", show_alert=True)
+        print(f"Proxy Link Error: {e}")
+        bot.send_message(call.message.chat.id, "❌ အကောင့်ထုတ်ပေးရာတွင် အခက်အခဲဖြစ်နေပါသည်။ (Supabase ၏ sessions table RLS ပိတ်ထားခြင်း ရှိ/မရှိ စစ်ဆေးပါ)")
+
 
 # --- Background Bot Run ---
 def run_bot():
@@ -161,7 +175,6 @@ def run_bot():
 
 @app.on_event("startup")
 def on_startup():
-    # FastAPI စတင်သည်နှင့် Bot ကို Thread အသစ်ဖြင့် နောက်ကွယ်မှ တွဲဖွင့်မည်
     threading.Thread(target=run_bot, daemon=True).start()
 
 
@@ -171,7 +184,6 @@ def on_startup():
 
 @app.get("/ping")
 def health_check():
-    # Cronjob ဖြင့် Ping လုပ်ရန် သီးသန့် Route
     return {"status": "alive", "message": "Proxy and Bot are running"}
 
 @app.get("/login")
@@ -183,7 +195,6 @@ async def login_and_set_cookie(token: str):
     actual_cookie = response.data[0]["cookie_value"]
     redirect = RedirectResponse(url="/")
     
-    # Browser တွင် Cookie တပ်ဆင်ပေးခြင်း
     redirect.set_cookie(
         key="__Secure-next-auth.session-token",
         value=actual_cookie,
@@ -198,7 +209,6 @@ async def reverse_proxy(request: Request, path: str):
     async with httpx.AsyncClient(base_url=TARGET_URL, follow_redirects=False) as client:
         url = httpx.URL(path=request.url.path, query=request.url.query.encode("utf-8"))
         
-        # Request Header များ ပြင်ဆင်ခြင်း
         headers = dict(request.headers)
         headers["host"] = "chatgpt.com"
         if "origin" in headers:
@@ -212,7 +222,6 @@ async def reverse_proxy(request: Request, path: str):
             httpx_resp = await client.send(req, stream=True)
             res_headers = dict(httpx_resp.headers)
             
-            # Error မတက်စေရန် မလိုအပ်သော Encoding Headers များ ဖယ်ရှားခြင်း
             for h in ["content-encoding", "content-length", "transfer-encoding"]:
                 res_headers.pop(h, None)
                 
