@@ -56,7 +56,6 @@ def add_new_cookie(message):
 def send_welcome(message):
     markup = InlineKeyboardMarkup(row_width=1)
     
-    # ခလုတ်များ ထည့်သွင်းခြင်း
     btn_get = InlineKeyboardButton("🔑 အကောင့်ယူမည်", callback_data="get_account")
     btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
     markup.add(btn_get, btn_stock)
@@ -71,7 +70,6 @@ def send_welcome(message):
 def handle_check_stock(call):
     try:
         bot.answer_callback_query(call.id, "📊 လက်ကျန် စစ်ဆေးနေပါသည်...")
-        # Database ထဲမှ အရေအတွက်ကို လှမ်းရေတွက်မည်
         res = supabase.table("cookies_pool").select("id").execute()
         count = len(res.data)
         
@@ -163,7 +161,6 @@ def handle_get_account(call):
         clean_domain = PROXY_DOMAIN.rstrip("/")
         magic_link = f"{clean_domain}/login?token={token}"
         
-        # Message သစ် အနေဖြင့် ပို့ပေးပါမည် (Error လုံးဝ မတက်နိုင်တော့ပါ)
         text = (
             "🎉 သင့်အတွက် အကောင့် အဆင်သင့်ဖြစ်ပါပြီ။\n\n"
             "အောက်ပါ Link ကို နှိပ်၍ <b>Chrome</b> ဖြင့် ဖွင့်ပြီး အသုံးပြုနိုင်ပါပြီ:\n"
@@ -174,7 +171,6 @@ def handle_get_account(call):
         
     except Exception as e:
         print(f"Proxy Link Error: {e}")
-        # Error တက်ခဲ့လျှင် User ထံသို့ အသိပေးပါမည်
         bot.send_message(call.message.chat.id, f"❌ အကောင့်ထုတ်ပေးရာတွင် အခက်အခဲဖြစ်နေပါသည်။ Error: {e}")
 
 
@@ -191,6 +187,10 @@ def on_startup():
 # ==========================================
 # အပိုင်း (၂) : FastAPI Reverse Proxy
 # ==========================================
+
+@app.get("/")
+def root_check():
+    return {"status": "online", "message": "ChatGPT Proxy & Bot is running!"}
 
 @app.get("/ping")
 def health_check():
