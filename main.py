@@ -8,17 +8,21 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import RedirectResponse
 from supabase import create_client, Client
-import zipfile  # ZIP ဖိုင် ဖြည်ရန် အသစ်ထည့်ထားသည်
-import io       # Memory တွင် ဖိုင်ဖတ်ရန် အသစ်ထည့်ထားသည်
+import zipfile
+import io
 
-# --- Environment Variables ---
+# ==========================================
+# 0. Environment Variables များကို ဆွဲယူခြင်း
+# ==========================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-PROXY_DOMAIN = os.environ.get("PROXY_DOMAIN")
 
-if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY, PROXY_DOMAIN]):
-    raise ValueError("Environment variables များ ပြည့်စုံစွာ မပါဝင်ပါ။")
+# Render မှ ထုတ်ပေးသော URL ကို အလိုအလျောက် ယူမည် (Env Variables တွင် ကိုယ်တိုင်ထည့်ရန်မလိုပါ)
+PROXY_DOMAIN = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
+
+if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
+    raise ValueError("Environment variables များ ပြည့်စုံစွာ မပါဝင်ပါ။ (BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY လိုအပ်ပါသည်)")
 
 # --- Initialize ---
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -29,9 +33,11 @@ app = FastAPI()
 ADMIN_CHAT_ID = 1847021130
 TARGET_URL = "https://chatgpt.com"
 
+
 # ==========================================
 # အပိုင်း (၁) : Telegram Bot လုပ်ဆောင်ချက်များ
 # ==========================================
+
 @bot.message_handler(commands=['addcookie'])
 def add_new_cookie(message):
     if message.chat.id != ADMIN_CHAT_ID:
@@ -47,7 +53,6 @@ def add_new_cookie(message):
     except Exception as e:
         bot.reply_to(message, f"❌ သိမ်းဆည်းရာတွင် အမှားဖြစ်နေပါသည်: {e}")
 
-# (ပြင်ဆင်ထားသော Menu)
 @bot.message_handler(commands=['start', 'menu'])
 def send_welcome(message):
     markup = InlineKeyboardMarkup()
@@ -61,16 +66,18 @@ def send_welcome(message):
         
     bot.reply_to(message, "မင်္ဂလာပါ။ ChatGPT အကောင့် ယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။", reply_markup=markup)
 
-# (ZIP ခလုတ်ကို နှိပ်လျှင် အလုပ်လုပ်မည့် အပိုင်း)
 @bot.callback_query_handler(func=lambda call: call.data == "upload_zip")
 def prompt_zip_upload(call):
     if call.message.chat.id != ADMIN_CHAT_ID:
         bot.answer_callback_query(call.id, "သင့်တွင် လုပ်ပိုင်ခွင့် မရှိပါ။", show_alert=True)
         return
+    
     bot.answer_callback_query(call.id)
-    bot.send_message(call.message.chat.id, "📁 သင့်မှာရှိတဲ့ Cookie တွေပါတဲ့ `.zip` (သို့) `.txt` ဖိုင်ကို ဒီထဲသို့ တိုက်ရိုက် ပို့ပေးပါ။\n\n*(ဖိုင်ထဲရှိ စာကြောင်းတစ်ကြောင်းကို Cookie တစ်ခုအဖြစ် မှတ်ယူပါမည်)*")
+    bot.send_message(
+        call.message.chat.id, 
+        "📁 သင့်မှာရှိတဲ့ Cookie တွေပါတဲ့ `.zip` (သို့) `.txt` ဖိုင်ကို ဒီထဲသို့ တိုက်ရိုက် ပို့ပေးပါ။\n\n*(ဖိုင်ထဲရှိ စာကြောင်းတစ်ကြောင်းကို Cookie တစ်ခုအဖြစ် မှတ်ယူပါမည်)*"
+    )
 
-# (ဖိုင် (Document) ပို့လိုက်လျှင် လက်ခံမည့် အပိုင်း သစ်)
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
     if message.chat.id != ADMIN_CHAT_ID:
@@ -117,7 +124,6 @@ def handle_document(message):
     except Exception as e:
         bot.reply_to(message, f"❌ ဖိုင်ဖတ်ရာတွင် အမှားဖြစ်နေပါသည်: {e}")
 
-# (အကောင့်ယူမည် ခလုတ် နှိပ်လျှင် အလုပ်လုပ်မည့် အပိုင်း - မူလအတိုင်း)
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
     try:
@@ -133,6 +139,7 @@ def handle_get_account(call):
         
         supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
         
+        # PROXY_DOMAIN တွင် အနောက်ဆုံးမှ '/' ပါနေပါက ဖြုတ်ထုတ်မည်
         clean_domain = PROXY_DOMAIN.rstrip("/")
         magic_link = f"{clean_domain}/login?token={token}"
         
@@ -154,13 +161,17 @@ def run_bot():
 
 @app.on_event("startup")
 def on_startup():
+    # FastAPI စတင်သည်နှင့် Bot ကို Thread အသစ်ဖြင့် နောက်ကွယ်မှ တွဲဖွင့်မည်
     threading.Thread(target=run_bot, daemon=True).start()
 
+
 # ==========================================
-# အပိုင်း (၂) : FastAPI Reverse Proxy (မူလအတိုင်း)
+# အပိုင်း (၂) : FastAPI Reverse Proxy
 # ==========================================
+
 @app.get("/ping")
 def health_check():
+    # Cronjob ဖြင့် Ping လုပ်ရန် သီးသန့် Route
     return {"status": "alive", "message": "Proxy and Bot are running"}
 
 @app.get("/login")
@@ -171,6 +182,8 @@ async def login_and_set_cookie(token: str):
         
     actual_cookie = response.data[0]["cookie_value"]
     redirect = RedirectResponse(url="/")
+    
+    # Browser တွင် Cookie တပ်ဆင်ပေးခြင်း
     redirect.set_cookie(
         key="__Secure-next-auth.session-token",
         value=actual_cookie,
@@ -184,6 +197,8 @@ async def login_and_set_cookie(token: str):
 async def reverse_proxy(request: Request, path: str):
     async with httpx.AsyncClient(base_url=TARGET_URL, follow_redirects=False) as client:
         url = httpx.URL(path=request.url.path, query=request.url.query.encode("utf-8"))
+        
+        # Request Header များ ပြင်ဆင်ခြင်း
         headers = dict(request.headers)
         headers["host"] = "chatgpt.com"
         if "origin" in headers:
@@ -196,6 +211,8 @@ async def reverse_proxy(request: Request, path: str):
         try:
             httpx_resp = await client.send(req, stream=True)
             res_headers = dict(httpx_resp.headers)
+            
+            # Error မတက်စေရန် မလိုအပ်သော Encoding Headers များ ဖယ်ရှားခြင်း
             for h in ["content-encoding", "content-length", "transfer-encoding"]:
                 res_headers.pop(h, None)
                 
