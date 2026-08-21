@@ -18,7 +18,6 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# Render မှ ထုတ်ပေးသော URL ကို အလိုအလျောက် ယူမည် (Env Variables တွင် ကိုယ်တိုင်ထည့်ရန်မလိုပါ)
 PROXY_DOMAIN = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
@@ -55,16 +54,35 @@ def add_new_cookie(message):
 
 @bot.message_handler(commands=['start', 'menu'])
 def send_welcome(message):
-    markup = InlineKeyboardMarkup()
-    btn_get = InlineKeyboardButton("🔑 အကောင့်ယူမည်", callback_data="get_account")
-    markup.add(btn_get)
+    markup = InlineKeyboardMarkup(row_width=1)
     
-    # Admin ဖြစ်လျှင် ZIP တင်ရန် ခလုတ်ပါ ပြပေးမည်
+    # ခလုတ်များ ထည့်သွင်းခြင်း
+    btn_get = InlineKeyboardButton("🔑 အကောင့်ယူမည်", callback_data="get_account")
+    btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
+    markup.add(btn_get, btn_stock)
+    
     if message.chat.id == ADMIN_CHAT_ID:
         btn_zip = InlineKeyboardButton("📁 Cookie ZIP / TXT တင်မည်", callback_data="upload_zip")
         markup.add(btn_zip)
         
-    bot.reply_to(message, "မင်္ဂလာပါ။ ChatGPT အကောင့် ယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။", reply_markup=markup)
+    bot.reply_to(message, "မင်္ဂလာပါ။ ChatGPT အကောင့် ယူရန် သို့မဟုတ် စစ်ဆေးရန် အောက်ပါ ခလုတ်များကို နှိပ်ပါ။", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data == "check_stock")
+def handle_check_stock(call):
+    try:
+        bot.answer_callback_query(call.id, "📊 လက်ကျန် စစ်ဆေးနေပါသည်...")
+        # Database ထဲမှ အရေအတွက်ကို လှမ်းရေတွက်မည်
+        res = supabase.table("cookies_pool").select("id").execute()
+        count = len(res.data)
+        
+        bot.send_message(
+            call.message.chat.id, 
+            f"📊 လက်ရှိ Database ထဲတွင် Cookie အခုရေ <b>({count})</b> ခု ကျန်ရှိပါသေးသည်။", 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Stock Error: {e}")
+        bot.send_message(call.message.chat.id, "❌ လက်ကျန်စစ်ဆေးရာတွင် အမှားဖြစ်နေပါသည်။")
 
 @bot.callback_query_handler(func=lambda call: call.data == "upload_zip")
 def prompt_zip_upload(call):
@@ -89,7 +107,6 @@ def handle_document(message):
             bot.reply_to(message, "⚠️ ကျေးဇူးပြု၍ `.zip` သို့မဟုတ် `.txt` ဖိုင်ကိုသာ တင်ပေးပါ။")
             return
         
-        # Loading စာသား ပို့ထားမည်
         msg = bot.reply_to(message, "⏳ ဖိုင်ကို ဖတ်နေပါသည်... Database သို့ တစ်ခါတည်း ထည့်သွင်းနေပါပြီ။ ခဏစောင့်ပါ။")
         
         file_info = bot.get_file(message.document.file_id)
@@ -97,7 +114,6 @@ def handle_document(message):
         
         all_cookies = []
         
-        # ZIP (သို့) TXT ဖတ်ပြီး Array ထဲ စုထည့်မည်
         if file_name.endswith('.zip'):
             with zipfile.ZipFile(io.BytesIO(downloaded_file)) as z:
                 for name in z.namelist():
@@ -111,12 +127,10 @@ def handle_document(message):
             lines = [line.strip() for line in content.split('\n') if line.strip()]
             all_cookies.extend(lines)
             
-        # Cookie တစ်ခုမှ မရှိလျှင်
         if not all_cookies:
             bot.edit_message_text("⚠️ ဖိုင်ထဲတွင် Cookie စာသားများ မတွေ့ရှိပါ။", chat_id=message.chat.id, message_id=msg.message_id)
             return
 
-        # Bulk Insert ဖြင့် ၅၀၀ စီခွဲ၍ Supabase သို့ အမြန်သွင်းမည်
         insert_data = [{"cookie_value": c} for c in all_cookies]
         chunk_size = 500 
         
@@ -129,13 +143,9 @@ def handle_document(message):
     except Exception as e:
         bot.reply_to(message, f"❌ ဖိုင်ဖတ်ရာတွင် အမှားဖြစ်နေပါသည်: {e}")
 
-# ==========================================
-# (ပြင်ဆင်ထားသော အကောင့်ယူမည် အပိုင်း)
-# ==========================================
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
     try:
-        # ခလုတ်နှိပ်လိုက်သည်နှင့် Loading မလည်နေစေရန် အရင်တုံ့ပြန်ပါမည်
         bot.answer_callback_query(call.id, "⏳ အကောင့် ထုတ်ယူနေပါသည်...")
         
         res = supabase.table("cookies_pool").select("cookie_value").execute()
@@ -148,24 +158,24 @@ def handle_get_account(call):
         selected_cookie = random.choice(cookies_list)['cookie_value']
         token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
         
-        # Sessions Table သို့ သိမ်းခြင်း
         supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
         
         clean_domain = PROXY_DOMAIN.rstrip("/")
         magic_link = f"{clean_domain}/login?token={token}"
         
-        # HTML ဖော်မတ်ကို ပြောင်းသုံးထားပါသည်
+        # Message သစ် အနေဖြင့် ပို့ပေးပါမည် (Error လုံးဝ မတက်နိုင်တော့ပါ)
         text = (
             "🎉 သင့်အတွက် အကောင့် အဆင်သင့်ဖြစ်ပါပြီ။\n\n"
             "အောက်ပါ Link ကို နှိပ်၍ <b>Chrome</b> ဖြင့် ဖွင့်ပြီး အသုံးပြုနိုင်ပါပြီ:\n"
             f"{magic_link}\n\n"
             "<i>(လုံခြုံရေးအရ ဤ Link ကို အခြားသူများအား မျှဝေခြင်း မပြုပါနှင့်)</i>"
         )
-        bot.edit_message_text(text, chat_id=call.message.chat.id, message_id=call.message.message_id, parse_mode="HTML")
+        bot.send_message(call.message.chat.id, text, parse_mode="HTML")
         
     except Exception as e:
         print(f"Proxy Link Error: {e}")
-        bot.send_message(call.message.chat.id, "❌ အကောင့်ထုတ်ပေးရာတွင် အခက်အခဲဖြစ်နေပါသည်။ (Supabase ၏ sessions table RLS ပိတ်ထားခြင်း ရှိ/မရှိ စစ်ဆေးပါ)")
+        # Error တက်ခဲ့လျှင် User ထံသို့ အသိပေးပါမည်
+        bot.send_message(call.message.chat.id, f"❌ အကောင့်ထုတ်ပေးရာတွင် အခက်အခဲဖြစ်နေပါသည်။ Error: {e}")
 
 
 # --- Background Bot Run ---
