@@ -12,7 +12,7 @@ import io
 import re
 from datetime import datetime
 
-# Cloudflare ကို ကျော်ဖြတ်ပေးမည့် Chrome ဟန်ဆောင် Library
+# Cloudflare ကို အစွမ်းကုန် ကျော်ဖြတ်မည့် Library
 from curl_cffi.requests import AsyncSession
 
 # ==========================================
@@ -59,20 +59,15 @@ def check_user_access(user_id):
         return True, "admin"
         
     user = get_or_create_user(user_id)
-    
-    if user["is_banned"]:
-        return False, "banned"
-        
-    if user["is_vip"]:
-        return True, "vip"
+    if user["is_banned"]: return False, "banned"
+    if user["is_vip"]: return True, "vip"
         
     today = datetime.now().strftime("%Y-%m-%d")
     if user["usage_date"] != today:
         supabase.table("users").update({"usage_date": today, "usage_count": 1}).eq("user_id", user_id).execute()
         return True, "normal"
     else:
-        if user["usage_count"] >= 5:
-            return False, "limit"
+        if user["usage_count"] >= 5: return False, "limit"
         else:
             supabase.table("users").update({"usage_count": user["usage_count"] + 1}).eq("user_id", user_id).execute()
             return True, "normal"
@@ -83,18 +78,14 @@ def check_user_access(user_id):
 
 @bot.message_handler(commands=['ban', 'unban', 'addvip', 'rmvip'])
 def manage_users(message):
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
-        
+    if message.chat.id != ADMIN_CHAT_ID: return
     parts = message.text.split()
     if len(parts) != 2:
         bot.reply_to(message, "အသုံးပြုနည်း: /ban [user_id]")
         return
-        
     try:
         target_id = int(parts[1])
         get_or_create_user(target_id)
-        
         cmd = parts[0].lower()
         if cmd == '/ban':
             supabase.table("users").update({"is_banned": True}).eq("user_id", target_id).execute()
@@ -121,11 +112,10 @@ def send_welcome(message):
         btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
         btn_zip = InlineKeyboardButton("📁 Cookie ZIP / TXT တင်မည်", callback_data="upload_zip")
         markup.add(btn_get, btn_vip, btn_stock, btn_zip)
-        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။\n(User များကို စီမံရန် /ban, /unban, /addvip, /rmvip [user_id] ကိုသုံးပါ)"
+        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။"
     else:
         markup.add(btn_get, btn_vip)
         text_msg = "မင်္ဂလာပါ။ ChatGPT လင့်ခ်ရယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။\n*(တစ်နေ့လျှင် ၅ ကြိမ် အခမဲ့ ရယူနိုင်ပါသည်)*"
-        
     bot.reply_to(message, text_msg, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data == "get_vip")
@@ -135,8 +125,7 @@ def handle_get_vip(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "check_stock")
 def handle_check_stock(call):
-    if call.message.chat.id != ADMIN_CHAT_ID:
-        return
+    if call.message.chat.id != ADMIN_CHAT_ID: return
     try:
         bot.answer_callback_query(call.id, "📊 လက်ကျန် စစ်ဆေးနေပါသည်...")
         res = supabase.table("cookies_pool").select("id", count="exact").execute()
@@ -146,15 +135,13 @@ def handle_check_stock(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "upload_zip")
 def prompt_zip_upload(call):
-    if call.message.chat.id != ADMIN_CHAT_ID:
-        return
+    if call.message.chat.id != ADMIN_CHAT_ID: return
     bot.answer_callback_query(call.id)
     bot.send_message(call.message.chat.id, "📁 Cookie တွေပါတဲ့ `.zip` (သို့) `.txt` ဖိုင်ကို တိုက်ရိုက် ပို့ပေးပါ။")
 
 @bot.message_handler(content_types=['document'])
 def handle_document(message):
-    if message.chat.id != ADMIN_CHAT_ID:
-        return
+    if message.chat.id != ADMIN_CHAT_ID: return
     try:
         file_name = message.document.file_name
         if not (file_name.endswith('.zip') or file_name.endswith('.txt')):
@@ -192,10 +179,8 @@ def handle_document(message):
 def handle_get_account(call):
     status, role = check_user_access(call.message.chat.id)
     if status == False:
-        if role == "banned":
-            bot.answer_callback_query(call.id, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။", show_alert=True)
-        elif role == "limit":
-            bot.answer_callback_query(call.id, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။ မနက်ဖြန်မှ ထပ်မံကြိုးစားပါ။", show_alert=True)
+        if role == "banned": bot.answer_callback_query(call.id, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။", show_alert=True)
+        elif role == "limit": bot.answer_callback_query(call.id, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။ မနက်ဖြန်မှ ထပ်မံကြိုးစားပါ။", show_alert=True)
         return
 
     try:
@@ -209,7 +194,6 @@ def handle_get_account(call):
         cookie_id = selected_record['id']
         selected_cookie = selected_record['cookie_value']
         
-        # ⚠️ အကောင့်ထုတ်ပေးပြီးပါက Database မှ ပြန်ဖျက်ပစ်မည် (Stock လျော့သွားမည်)
         supabase.table("cookies_pool").delete().eq("id", cookie_id).execute()
         
         token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
@@ -218,19 +202,35 @@ def handle_get_account(call):
         clean_domain = PROXY_DOMAIN.rstrip("/")
         magic_link = f"{clean_domain}/login?token={token}"
         
-        text = (
-            "🎉 <b>သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။</b>\n\n"
-            "အောက်ပါ Link ကို နှိပ်၍ <b>Chrome Browser</b> ဖြင့် ဖွင့်ပါ:\n"
-            f"{magic_link}\n\n"
-        )
-        if role == "normal":
-            text += "<i>(ယနေ့ အခမဲ့ရယူခွင့် ၅ ကြိမ်တွင် ၁ ကြိမ် ခုနှိမ်လိုက်ပါသည်)</i>"
-        elif role == "vip":
-            text += "<i>(👑 VIP အကောင့်ဖြစ်သဖြင့် အကန့်အသတ်မရှိ ရယူနိုင်ပါသည်)</i>"
+        text = f"🎉 <b>သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။</b>\n\nအောက်ပါ Link ကို နှိပ်၍ <b>Chrome Browser</b> ဖြင့် ဖွင့်ပါ:\n{magic_link}\n\n"
+        if role == "normal": text += "<i>(ယနေ့ အခမဲ့ရယူခွင့် ၅ ကြိမ်တွင် ၁ ကြိမ် ခုနှိမ်လိုက်ပါသည်)</i>"
+        elif role == "vip": text += "<i>(👑 VIP အကောင့်ဖြစ်သဖြင့် အကန့်အသတ်မရှိ ရယူနိုင်ပါသည်)</i>"
             
         bot.send_message(call.message.chat.id, text, parse_mode="HTML")
     except Exception as e:
         bot.send_message(call.message.chat.id, f"❌ Error: {e}")
+
+@bot.message_handler(func=lambda message: True, content_types=['text'])
+def handle_text_cookie(message):
+    text = message.text.strip()
+    if text.startswith('/'): return
+    status, role = check_user_access(message.chat.id)
+    if status == False:
+        if role == "banned": bot.reply_to(message, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။")
+        elif role == "limit": bot.reply_to(message, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။")
+        return
+        
+    try:
+        msg = bot.reply_to(message, "⏳ သင့် Cookie အား Proxy Link အဖြစ် ပြောင်းလဲနေပါသည်...")
+        token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+        supabase.table("sessions").insert({"token": token, "cookie_value": text}).execute()
+        clean_domain = PROXY_DOMAIN.rstrip("/")
+        magic_link = f"{clean_domain}/login?token={token}"
+        reply_text = f"✅ <b>အောင်မြင်ပါသည်။</b>\n\nသင့် Cookie အား လင့်ခ်အဖြစ် ပြောင်းလဲပြီးပါပြီ။ အောက်ပါ Link ကို နှိပ်၍ Chrome ဖြင့် ဖွင့်ပါ:\n{magic_link}"
+        bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML")
+    except Exception as e:
+        bot.reply_to(message, f"❌ Link ပြောင်းရာတွင် အမှားဖြစ်နေပါသည်: {e}")
+
 
 # --- Background Bot Run ---
 def run_bot():
@@ -245,8 +245,9 @@ def run_bot():
 def on_startup():
     threading.Thread(target=run_bot, daemon=True).start()
 
+
 # ==========================================
-# အပိုင်း (၂) : FastAPI Reverse Proxy (Cloudflare Bypass ဖြင့်)
+# အပိုင်း (၂) : FastAPI Reverse Proxy (Max Bypass)
 # ==========================================
 
 @app.get("/ping")
@@ -261,7 +262,6 @@ async def login_and_set_cookie(token: str):
             return {"Error": "Token အမှား (သို့) သက်တမ်းကုန်သွားပါပြီ။"}
             
         raw_cookie = response.data[0]["cookie_value"].strip()
-        # Cookie အမှိုက်များ ရှင်းလင်းခြင်း (Tab များပါနေပါက ဖြတ်ထုတ်မည်)
         clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
         
         redirect = RedirectResponse(url="/")
@@ -282,28 +282,43 @@ async def reverse_proxy(request: Request, path: str):
     if request.url.query:
         url += f"?{request.url.query}"
         
-    headers = dict(request.headers)
-    headers["host"] = "chatgpt.com"
+    # Anti-Snitch: Render မှ သတင်းပေးသည့် Headers များကို ဖယ်ရှားပစ်ခြင်း
+    forbidden_headers = [
+        "x-forwarded-for", "x-forwarded-proto", "x-forwarded-port",
+        "x-real-ip", "cf-connecting-ip", "true-client-ip", "x-render-host",
+        "host", "accept-encoding"
+    ]
     
-    # ဂြိုဟ်သားစာမပေါ်စေရန် zip format တောင်းဆိုမှုကို ပိတ်ခြင်း
-    headers.pop("accept-encoding", None)
-    
-    if "origin" in headers:
-        headers["origin"] = TARGET_URL
-    if "referer" in headers:
-        headers["referer"] = headers["referer"].replace(str(request.base_url), TARGET_URL + "/")
+    clean_headers = {}
+    for k, v in request.headers.items():
+        if k.lower() not in forbidden_headers:
+            clean_headers[k] = v
+            
+    # လူအစစ် Browser ကဲ့သို့ Headers များ အတင်းတပ်ဆင်ခြင်း
+    clean_headers["host"] = "chatgpt.com"
+    clean_headers["origin"] = TARGET_URL
+    clean_headers["referer"] = f"{TARGET_URL}/"
+    clean_headers["sec-ch-ua"] = '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"'
+    clean_headers["sec-ch-ua-mobile"] = "?0"
+    clean_headers["sec-ch-ua-platform"] = '"Windows"'
+    clean_headers["sec-fetch-dest"] = "document"
+    clean_headers["sec-fetch-mode"] = "navigate"
+    clean_headers["sec-fetch-site"] = "none"
+    clean_headers["sec-fetch-user"] = "?1"
+    clean_headers["upgrade-insecure-requests"] = "1"
         
     body = await request.body()
     
     try:
-        # Chrome Browser အစစ်ကဲ့သို့ ဟန်ဆောင်၍ Cloudflare ကို ကျော်ဖြတ်ခြင်း
+        # Browser Spoofing (Chrome 120 အစစ်ကဲ့သို့ ချိတ်ဆက်ခြင်း)
         async with AsyncSession(impersonate="chrome120") as client:
             resp = await client.request(
                 method=request.method,
                 url=url,
-                headers=headers,
+                headers=clean_headers,
                 data=body,
-                allow_redirects=False
+                allow_redirects=False,
+                timeout=30
             )
             
         res_headers = dict(resp.headers)
