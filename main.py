@@ -20,16 +20,14 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
     raise ValueError("Environment variables များ ပြည့်စုံစွာ မပါဝင်ပါ။")
 
-# --- Initialize ---
 bot = telebot.TeleBot(BOT_TOKEN)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-app = FastAPI() # Render အိပ်မသွားစေရန် Dummy Server သက်သက်သာ
+app = FastAPI() 
 
 ADMIN_CHAT_ID = 1847021130
 
-# 🌟 ဤနေရာတွင် Third-Party Proxy လင့်ခ်ကို ထည့်ပါ 🌟
-# (အကယ်၍ ဤလင့်ခ် ပိတ်သွားပါက အခြားအလုပ်လုပ်သော Reverse Proxy လင့်ခ်ဖြင့် လဲလှယ်နိုင်ပါသည်)
-THIRD_PARTY_PROXY = "https://free.chatgpt.org.uk"
+# Render ၏ Environment Variables မှ PROXY_URL ကို ယူပါမည်။
+THIRD_PARTY_PROXY = os.environ.get("PROXY_URL", "")
 
 
 # ==========================================
@@ -112,7 +110,7 @@ def send_welcome(message):
         btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
         btn_zip = InlineKeyboardButton("📁 Cookie ZIP / TXT တင်မည်", callback_data="upload_zip")
         markup.add(btn_get, btn_vip, btn_stock, btn_zip)
-        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။\n(User များကို စီမံရန် /ban, /unban, /addvip, /rmvip [user_id] ကိုသုံးပါ)"
+        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။"
     else:
         markup.add(btn_get, btn_vip)
         text_msg = "မင်္ဂလာပါ။ ChatGPT လင့်ခ်ရယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။\n*(တစ်နေ့လျှင် ၅ ကြိမ် အခမဲ့ ရယူနိုင်ပါသည်)*"
@@ -177,10 +175,14 @@ def handle_document(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
+    if not THIRD_PARTY_PROXY:
+        bot.answer_callback_query(call.id, "⚠️ Admin မှ Proxy Link အသစ် ထည့်သွင်းထားခြင်း မရှိသေးပါ။", show_alert=True)
+        return
+
     status, role = check_user_access(call.message.chat.id)
     if status == False:
         if role == "banned": bot.answer_callback_query(call.id, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။", show_alert=True)
-        elif role == "limit": bot.answer_callback_query(call.id, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။ မနက်ဖြန်မှ ထပ်မံကြိုးစားပါ။", show_alert=True)
+        elif role == "limit": bot.answer_callback_query(call.id, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။", show_alert=True)
         return
 
     try:
@@ -194,20 +196,13 @@ def handle_get_account(call):
         cookie_id = selected_record['id']
         raw_cookie = selected_record['cookie_value'].strip()
         
-        # Cookie မှ Tab များကို ဖယ်ရှား၍ သန့်စင်ခြင်း
         clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
-        
-        # Stock လျှော့ချခြင်း
         supabase.table("cookies_pool").delete().eq("id", cookie_id).execute()
         
-        # Third Party Proxy ဖြင့် တိုက်ရိုက်ချိတ်ဆက်ပေးမည့် Link ဖန်တီးခြင်း
         clean_proxy = THIRD_PARTY_PROXY.rstrip("/")
-        # free.chatgpt.org.uk စနစ်အရ /login?token= (သို့မဟုတ်) /api/auth/session စသည်ဖြင့် လက်ခံတတ်ပါသည်။
-        # များသောအားဖြင့် Token ကို URL Parameter အနေဖြင့် တွဲပို့လေ့ရှိပါသည်။
         magic_link = f"{clean_proxy}/?__Secure-next-auth.session-token={clean_cookie}"
         
         text = f"🎉 <b>သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။</b>\n\nအောက်ပါ Link ကို နှိပ်၍ <b>Chrome Browser</b> ဖြင့် ဖွင့်ပါ:\n{magic_link}\n\n"
-        
         if role == "normal": text += "<i>(ယနေ့ အခမဲ့ရယူခွင့် ၅ ကြိမ်တွင် ၁ ကြိမ် ခုနှိမ်လိုက်ပါသည်)</i>"
         elif role == "vip": text += "<i>(👑 VIP အကောင့်ဖြစ်သဖြင့် အကန့်အသတ်မရှိ ရယူနိုင်ပါသည်)</i>"
             
@@ -219,6 +214,11 @@ def handle_get_account(call):
 def handle_text_cookie(message):
     text = message.text.strip()
     if text.startswith('/'): return
+    
+    if not THIRD_PARTY_PROXY:
+        bot.reply_to(message, "⚠️ Admin မှ Proxy Link အသစ် ထည့်သွင်းထားခြင်း မရှိသေးပါ။")
+        return
+        
     status, role = check_user_access(message.chat.id)
     if status == False:
         if role == "banned": bot.reply_to(message, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။")
@@ -227,8 +227,6 @@ def handle_text_cookie(message):
         
     try:
         msg = bot.reply_to(message, "⏳ သင့် Cookie အား Proxy Link အဖြစ် ပြောင်းလဲနေပါသည်...")
-        
-        # သန့်စင်ခြင်း
         clean_cookie = re.split(r'[\t\s]+', text)[-1]
         
         clean_proxy = THIRD_PARTY_PROXY.rstrip("/")
@@ -255,7 +253,6 @@ def on_startup():
 # ==========================================
 # အပိုင်း (၂) : FastAPI Health Check (Render အတွက်သာ)
 # ==========================================
-# (Proxy အပိုင်းများ ဖြုတ်ချလိုက်ပါပြီ။)
 
 @app.get("/")
 def root_check():
