@@ -80,7 +80,6 @@ def check_user_access(user_id):
 # အပိုင်း (၁) : Telegram Bot လုပ်ဆောင်ချက်များ
 # ==========================================
 
-# (အသစ်) Admin Commands များ
 @bot.message_handler(commands=['ban', 'unban', 'addvip', 'rmvip'])
 def manage_users(message):
     if message.chat.id != ADMIN_CHAT_ID:
@@ -93,7 +92,7 @@ def manage_users(message):
         
     try:
         target_id = int(parts[1])
-        get_or_create_user(target_id) # Ensure user exists
+        get_or_create_user(target_id)
         
         cmd = parts[0].lower()
         if cmd == '/ban':
@@ -139,7 +138,6 @@ def handle_check_stock(call):
         return
     try:
         bot.answer_callback_query(call.id, "📊 လက်ကျန် စစ်ဆေးနေပါသည်...")
-        # Exact Count စနစ်ကို ပြောင်းသုံးထားပါသည် (၁၀၀၀ ကျော်လည်း မှန်ကန်စွာ ပြပါမည်)
         res = supabase.table("cookies_pool").select("id", count="exact").execute()
         total_cookies = res.count
         bot.send_message(call.message.chat.id, f"📊 Database တွင် Cookie <b>({total_cookies})</b> ခု ကျန်ရှိပါသေးသည်။", parse_mode="HTML")
@@ -192,7 +190,6 @@ def handle_document(message):
 
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
-    # Ban, VIP နှင့် Limit စစ်ဆေးခြင်း
     status, role = check_user_access(call.message.chat.id)
     if status == False:
         if role == "banned":
@@ -203,12 +200,20 @@ def handle_get_account(call):
 
     try:
         bot.answer_callback_query(call.id, "⏳ လင့်ခ် ထုတ်ယူနေပါသည်...")
-        res = supabase.table("cookies_pool").select("cookie_value").execute()
+        # 1. Cookie ကို id ပါ တွဲဆွဲထုတ်ပါမည် (ဖျက်ပစ်ရန်အတွက်)
+        res = supabase.table("cookies_pool").select("id, cookie_value").execute()
         if not res.data:
-            bot.send_message(call.message.chat.id, "⚠️ လက်ရှိတွင် အသုံးပြုနိုင်သော Cookie မရှိသေးပါ။")
+            bot.send_message(call.message.chat.id, "⚠️ လက်ရှိတွင် အသုံးပြုနိုင်သော Cookie မရှိသေးပါ။ (Stock ကုန်နေပါသည်)")
             return
             
-        selected_cookie = random.choice(res.data)['cookie_value']
+        # 2. ရွေးချယ်ပြီးပါက ထို Cookie ကို Database ထဲမှ ဖျက်ပစ်မည် (Stock လျော့သွားမည်)
+        selected_record = random.choice(res.data)
+        selected_cookie = selected_record['cookie_value']
+        cookie_id = selected_record['id']
+        
+        supabase.table("cookies_pool").delete().eq("id", cookie_id).execute()
+        
+        # 3. Session ဖန်တီးမည်
         token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
         supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
         
@@ -292,8 +297,6 @@ async def login_and_set_cookie(token: str):
             return {"Error": "Token အမှား (သို့) သက်တမ်းကုန်သွားပါပြီ။"}
             
         raw_cookie = response.data[0]["cookie_value"].strip()
-        
-        # ⚠️ Cookie Error မတက်စေရန် Tab များပါနေပါက နောက်ဆုံး Token စာသားကိုသာ သန့်စင်ယူမည့်အပိုင်း
         clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
         
         redirect = RedirectResponse(url="/")
@@ -315,6 +318,11 @@ async def reverse_proxy(request: Request, path: str):
         
         headers = dict(request.headers)
         headers["host"] = "chatgpt.com"
+        
+        # ⚠️ အရေးကြီးပြင်ဆင်ချက်: ChatGPT မှ Compressed လုပ်ထားသော (Zip/Brotli) Data များ မပို့စေရန် တားဆီးခြင်း 
+        # ၎င်းသည် Browser တွင် ဂြိုဟ်သားစာ (Gibberish) များ ပေါ်လာခြင်းကို အပြည့်အဝ ကာကွယ်ပေးပါမည်။
+        headers.pop("accept-encoding", None)
+        
         if "origin" in headers:
             headers["origin"] = TARGET_URL
         if "referer" in headers:
