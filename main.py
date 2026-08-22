@@ -2,7 +2,6 @@ import os
 import threading
 import random
 import string
-import httpx
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 from fastapi import FastAPI, Request, Response, HTTPException
@@ -12,6 +11,9 @@ import zipfile
 import io
 import re
 from datetime import datetime
+
+# Cloudflare ကို ကျော်ဖြတ်ပေးမည့် Chrome ဟန်ဆောင် Library
+from curl_cffi.requests import AsyncSession
 
 # ==========================================
 # 0. Environment Variables များကို ဆွဲယူခြင်း
@@ -24,7 +26,6 @@ PROXY_DOMAIN = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
     raise ValueError("Environment variables များ ပြည့်စုံစွာ မပါဝင်ပါ။")
 
-# --- Initialize ---
 bot = telebot.TeleBot(BOT_TOKEN)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 app = FastAPI()
@@ -120,7 +121,7 @@ def send_welcome(message):
         btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
         btn_zip = InlineKeyboardButton("📁 Cookie ZIP / TXT တင်မည်", callback_data="upload_zip")
         markup.add(btn_get, btn_vip, btn_stock, btn_zip)
-        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။\n(User များကို စီမံရန် /ban, /unban, /addvip, /rmvip [user_id] များကို အသုံးပြုနိုင်ပါပြီ)"
+        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။\n(User များကို စီမံရန် /ban, /unban, /addvip, /rmvip [user_id] ကိုသုံးပါ)"
     else:
         markup.add(btn_get, btn_vip)
         text_msg = "မင်္ဂလာပါ။ ChatGPT လင့်ခ်ရယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။\n*(တစ်နေ့လျှင် ၅ ကြိမ် အခမဲ့ ရယူနိုင်ပါသည်)*"
@@ -139,10 +140,9 @@ def handle_check_stock(call):
     try:
         bot.answer_callback_query(call.id, "📊 လက်ကျန် စစ်ဆေးနေပါသည်...")
         res = supabase.table("cookies_pool").select("id", count="exact").execute()
-        total_cookies = res.count
-        bot.send_message(call.message.chat.id, f"📊 Database တွင် Cookie <b>({total_cookies})</b> ခု ကျန်ရှိပါသေးသည်။", parse_mode="HTML")
+        bot.send_message(call.message.chat.id, f"📊 Database တွင် Cookie <b>({res.count})</b> ခု ကျန်ရှိပါသေးသည်။", parse_mode="HTML")
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ လက်ကျန်စစ်ဆေးရာတွင် အမှားဖြစ်နေပါသည်။ Error: {e}")
+        bot.send_message(call.message.chat.id, f"❌ Error: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "upload_zip")
 def prompt_zip_upload(call):
@@ -186,7 +186,7 @@ def handle_document(message):
             
         bot.edit_message_text(f"✅ အောင်မြင်ပါသည်။ Cookie အသစ် ({len(all_cookies)}) ခု ထည့်သွင်းပြီးပါပြီ。", chat_id=message.chat.id, message_id=msg.message_id)
     except Exception as e:
-        bot.reply_to(message, f"❌ ဖိုင်ဖတ်ရာတွင် အမှားဖြစ်နေပါသည်: {e}")
+        bot.reply_to(message, f"❌ Error: {e}")
 
 @bot.callback_query_handler(func=lambda call: call.data == "get_account")
 def handle_get_account(call):
@@ -200,20 +200,18 @@ def handle_get_account(call):
 
     try:
         bot.answer_callback_query(call.id, "⏳ လင့်ခ် ထုတ်ယူနေပါသည်...")
-        # 1. Cookie ကို id ပါ တွဲဆွဲထုတ်ပါမည် (ဖျက်ပစ်ရန်အတွက်)
         res = supabase.table("cookies_pool").select("id, cookie_value").execute()
         if not res.data:
             bot.send_message(call.message.chat.id, "⚠️ လက်ရှိတွင် အသုံးပြုနိုင်သော Cookie မရှိသေးပါ။ (Stock ကုန်နေပါသည်)")
             return
             
-        # 2. ရွေးချယ်ပြီးပါက ထို Cookie ကို Database ထဲမှ ဖျက်ပစ်မည် (Stock လျော့သွားမည်)
         selected_record = random.choice(res.data)
-        selected_cookie = selected_record['cookie_value']
         cookie_id = selected_record['id']
+        selected_cookie = selected_record['cookie_value']
         
+        # ⚠️ အကောင့်ထုတ်ပေးပြီးပါက Database မှ ပြန်ဖျက်ပစ်မည် (Stock လျော့သွားမည်)
         supabase.table("cookies_pool").delete().eq("id", cookie_id).execute()
         
-        # 3. Session ဖန်တီးမည်
         token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
         supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
         
@@ -221,7 +219,7 @@ def handle_get_account(call):
         magic_link = f"{clean_domain}/login?token={token}"
         
         text = (
-            "🎉 သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။\n\n"
+            "🎉 <b>သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။</b>\n\n"
             "အောက်ပါ Link ကို နှိပ်၍ <b>Chrome Browser</b> ဖြင့် ဖွင့်ပါ:\n"
             f"{magic_link}\n\n"
         )
@@ -232,40 +230,7 @@ def handle_get_account(call):
             
         bot.send_message(call.message.chat.id, text, parse_mode="HTML")
     except Exception as e:
-        bot.send_message(call.message.chat.id, f"❌ လင့်ခ်ထုတ်ပေးရာတွင် အခက်အခဲဖြစ်နေပါသည်။ Error: {e}")
-
-@bot.message_handler(func=lambda message: True, content_types=['text'])
-def handle_text_cookie(message):
-    text = message.text.strip()
-    if text.startswith('/'):
-        return
-        
-    status, role = check_user_access(message.chat.id)
-    if status == False:
-        if role == "banned":
-            bot.reply_to(message, "🚫 သင့်အကောင့်အား ပိတ်ပင် (Ban) ထားပါသည်။")
-        elif role == "limit":
-            bot.reply_to(message, "⚠️ သင့်၏ ယနေ့အတွက် အခမဲ့ (၅) ကြိမ် ကန့်သတ်ချက် ပြည့်သွားပါပြီ။")
-        return
-        
-    try:
-        msg = bot.reply_to(message, "⏳ သင့် Cookie အား Proxy Link အဖြစ် ပြောင်းလဲနေပါသည်...")
-        token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-        
-        supabase.table("sessions").insert({"token": token, "cookie_value": text}).execute()
-        
-        clean_domain = PROXY_DOMAIN.rstrip("/")
-        magic_link = f"{clean_domain}/login?token={token}"
-        
-        reply_text = (
-            "✅ <b>အောင်မြင်ပါသည်။</b>\n\n"
-            "သင့် Cookie အား လင့်ခ်အဖြစ် ပြောင်းလဲပြီးပါပြီ။ အောက်ပါ Link ကို နှိပ်၍ Chrome ဖြင့် ဖွင့်ပါ:\n"
-            f"{magic_link}"
-        )
-        bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML")
-    except Exception as e:
-        bot.reply_to(message, f"❌ Link ပြောင်းရာတွင် အမှားဖြစ်နေပါသည်: {e}")
-
+        bot.send_message(call.message.chat.id, f"❌ Error: {e}")
 
 # --- Background Bot Run ---
 def run_bot():
@@ -280,14 +245,13 @@ def run_bot():
 def on_startup():
     threading.Thread(target=run_bot, daemon=True).start()
 
-
 # ==========================================
-# အပိုင်း (၂) : FastAPI Reverse Proxy
+# အပိုင်း (၂) : FastAPI Reverse Proxy (Cloudflare Bypass ဖြင့်)
 # ==========================================
 
 @app.get("/ping")
 def health_check():
-    return {"status": "alive", "message": "Proxy and Bot are running"}
+    return {"status": "alive"}
 
 @app.get("/login")
 async def login_and_set_cookie(token: str):
@@ -297,6 +261,7 @@ async def login_and_set_cookie(token: str):
             return {"Error": "Token အမှား (သို့) သက်တမ်းကုန်သွားပါပြီ။"}
             
         raw_cookie = response.data[0]["cookie_value"].strip()
+        # Cookie အမှိုက်များ ရှင်းလင်းခြင်း (Tab များပါနေပါက ဖြတ်ထုတ်မည်)
         clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
         
         redirect = RedirectResponse(url="/")
@@ -313,34 +278,42 @@ async def login_and_set_cookie(token: str):
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
 async def reverse_proxy(request: Request, path: str):
-    async with httpx.AsyncClient(base_url=TARGET_URL, follow_redirects=False) as client:
-        url = httpx.URL(path=request.url.path, query=request.url.query.encode("utf-8"))
+    url = f"{TARGET_URL}/{path}"
+    if request.url.query:
+        url += f"?{request.url.query}"
         
-        headers = dict(request.headers)
-        headers["host"] = "chatgpt.com"
+    headers = dict(request.headers)
+    headers["host"] = "chatgpt.com"
+    
+    # ဂြိုဟ်သားစာမပေါ်စေရန် zip format တောင်းဆိုမှုကို ပိတ်ခြင်း
+    headers.pop("accept-encoding", None)
+    
+    if "origin" in headers:
+        headers["origin"] = TARGET_URL
+    if "referer" in headers:
+        headers["referer"] = headers["referer"].replace(str(request.base_url), TARGET_URL + "/")
         
-        # ⚠️ အရေးကြီးပြင်ဆင်ချက်: ChatGPT မှ Compressed လုပ်ထားသော (Zip/Brotli) Data များ မပို့စေရန် တားဆီးခြင်း 
-        # ၎င်းသည် Browser တွင် ဂြိုဟ်သားစာ (Gibberish) များ ပေါ်လာခြင်းကို အပြည့်အဝ ကာကွယ်ပေးပါမည်။
-        headers.pop("accept-encoding", None)
-        
-        if "origin" in headers:
-            headers["origin"] = TARGET_URL
-        if "referer" in headers:
-            headers["referer"] = headers["referer"].replace(str(request.base_url), TARGET_URL + "/")
-            
-        req = client.build_request(request.method, url, headers=headers, content=await request.body())
-        
-        try:
-            httpx_resp = await client.send(req, stream=True)
-            res_headers = dict(httpx_resp.headers)
-            
-            for h in ["content-encoding", "content-length", "transfer-encoding"]:
-                res_headers.pop(h, None)
-                
-            return Response(
-                content=await httpx_resp.aread(),
-                status_code=httpx_resp.status_code,
-                headers=res_headers
+    body = await request.body()
+    
+    try:
+        # Chrome Browser အစစ်ကဲ့သို့ ဟန်ဆောင်၍ Cloudflare ကို ကျော်ဖြတ်ခြင်း
+        async with AsyncSession(impersonate="chrome120") as client:
+            resp = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                data=body,
+                allow_redirects=False
             )
-        except Exception as e:
-            return Response(content=f"Proxy Fetch Error: {str(e)}", status_code=500)
+            
+        res_headers = dict(resp.headers)
+        for h in ["content-encoding", "content-length", "transfer-encoding"]:
+            res_headers.pop(h, None)
+            
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=res_headers
+        )
+    except Exception as e:
+        return Response(content=f"Proxy Fetch Error: {str(e)}", status_code=500)
