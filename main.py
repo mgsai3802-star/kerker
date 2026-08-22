@@ -1,19 +1,14 @@
 import os
 import threading
 import random
-import string
+import re
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import FastAPI
 from supabase import create_client, Client
 import zipfile
 import io
-import re
 from datetime import datetime
-
-# Cloudflare ကို အစွမ်းကုန် ကျော်ဖြတ်မည့် Library
-from curl_cffi.requests import AsyncSession
 
 # ==========================================
 # 0. Environment Variables များကို ဆွဲယူခြင်း
@@ -21,17 +16,21 @@ from curl_cffi.requests import AsyncSession
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
-PROXY_DOMAIN = os.environ.get("RENDER_EXTERNAL_URL", "http://localhost:8000")
 
 if not all([BOT_TOKEN, SUPABASE_URL, SUPABASE_KEY]):
     raise ValueError("Environment variables များ ပြည့်စုံစွာ မပါဝင်ပါ။")
 
+# --- Initialize ---
 bot = telebot.TeleBot(BOT_TOKEN)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-app = FastAPI()
+app = FastAPI() # Render အိပ်မသွားစေရန် Dummy Server သက်သက်သာ
 
 ADMIN_CHAT_ID = 1847021130
-TARGET_URL = "https://chatgpt.com"
+
+# 🌟 ဤနေရာတွင် Third-Party Proxy လင့်ခ်ကို ထည့်ပါ 🌟
+# (အကယ်၍ ဤလင့်ခ် ပိတ်သွားပါက အခြားအလုပ်လုပ်သော Reverse Proxy လင့်ခ်ဖြင့် လဲလှယ်နိုင်ပါသည်)
+THIRD_PARTY_PROXY = "https://free.chatgpt.org.uk"
+
 
 # ==========================================
 # User & VIP/Ban Management System
@@ -71,6 +70,7 @@ def check_user_access(user_id):
         else:
             supabase.table("users").update({"usage_count": user["usage_count"] + 1}).eq("user_id", user_id).execute()
             return True, "normal"
+
 
 # ==========================================
 # အပိုင်း (၁) : Telegram Bot လုပ်ဆောင်ချက်များ
@@ -112,7 +112,7 @@ def send_welcome(message):
         btn_stock = InlineKeyboardButton("📊 လက်ကျန်စစ်မည်", callback_data="check_stock")
         btn_zip = InlineKeyboardButton("📁 Cookie ZIP / TXT တင်မည်", callback_data="upload_zip")
         markup.add(btn_get, btn_vip, btn_stock, btn_zip)
-        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။"
+        text_msg = "👨‍💻 Admin Menu သို့ ကြိုဆိုပါတယ်။\n(User များကို စီမံရန် /ban, /unban, /addvip, /rmvip [user_id] ကိုသုံးပါ)"
     else:
         markup.add(btn_get, btn_vip)
         text_msg = "မင်္ဂလာပါ။ ChatGPT လင့်ခ်ရယူရန် အောက်ပါ ခလုတ်ကို နှိပ်ပါ။\n*(တစ်နေ့လျှင် ၅ ကြိမ် အခမဲ့ ရယူနိုင်ပါသည်)*"
@@ -192,17 +192,22 @@ def handle_get_account(call):
             
         selected_record = random.choice(res.data)
         cookie_id = selected_record['id']
-        selected_cookie = selected_record['cookie_value']
+        raw_cookie = selected_record['cookie_value'].strip()
         
+        # Cookie မှ Tab များကို ဖယ်ရှား၍ သန့်စင်ခြင်း
+        clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
+        
+        # Stock လျှော့ချခြင်း
         supabase.table("cookies_pool").delete().eq("id", cookie_id).execute()
         
-        token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-        supabase.table("sessions").insert({"token": token, "cookie_value": selected_cookie}).execute()
-        
-        clean_domain = PROXY_DOMAIN.rstrip("/")
-        magic_link = f"{clean_domain}/login?token={token}"
+        # Third Party Proxy ဖြင့် တိုက်ရိုက်ချိတ်ဆက်ပေးမည့် Link ဖန်တီးခြင်း
+        clean_proxy = THIRD_PARTY_PROXY.rstrip("/")
+        # free.chatgpt.org.uk စနစ်အရ /login?token= (သို့မဟုတ်) /api/auth/session စသည်ဖြင့် လက်ခံတတ်ပါသည်။
+        # များသောအားဖြင့် Token ကို URL Parameter အနေဖြင့် တွဲပို့လေ့ရှိပါသည်။
+        magic_link = f"{clean_proxy}/?__Secure-next-auth.session-token={clean_cookie}"
         
         text = f"🎉 <b>သင့်အတွက် လင့်ခ် အဆင်သင့်ဖြစ်ပါပြီ။</b>\n\nအောက်ပါ Link ကို နှိပ်၍ <b>Chrome Browser</b> ဖြင့် ဖွင့်ပါ:\n{magic_link}\n\n"
+        
         if role == "normal": text += "<i>(ယနေ့ အခမဲ့ရယူခွင့် ၅ ကြိမ်တွင် ၁ ကြိမ် ခုနှိမ်လိုက်ပါသည်)</i>"
         elif role == "vip": text += "<i>(👑 VIP အကောင့်ဖြစ်သဖြင့် အကန့်အသတ်မရှိ ရယူနိုင်ပါသည်)</i>"
             
@@ -222,15 +227,17 @@ def handle_text_cookie(message):
         
     try:
         msg = bot.reply_to(message, "⏳ သင့် Cookie အား Proxy Link အဖြစ် ပြောင်းလဲနေပါသည်...")
-        token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
-        supabase.table("sessions").insert({"token": token, "cookie_value": text}).execute()
-        clean_domain = PROXY_DOMAIN.rstrip("/")
-        magic_link = f"{clean_domain}/login?token={token}"
+        
+        # သန့်စင်ခြင်း
+        clean_cookie = re.split(r'[\t\s]+', text)[-1]
+        
+        clean_proxy = THIRD_PARTY_PROXY.rstrip("/")
+        magic_link = f"{clean_proxy}/?__Secure-next-auth.session-token={clean_cookie}"
+        
         reply_text = f"✅ <b>အောင်မြင်ပါသည်။</b>\n\nသင့် Cookie အား လင့်ခ်အဖြစ် ပြောင်းလဲပြီးပါပြီ။ အောက်ပါ Link ကို နှိပ်၍ Chrome ဖြင့် ဖွင့်ပါ:\n{magic_link}"
         bot.edit_message_text(reply_text, chat_id=message.chat.id, message_id=msg.message_id, parse_mode="HTML")
     except Exception as e:
         bot.reply_to(message, f"❌ Link ပြောင်းရာတွင် အမှားဖြစ်နေပါသည်: {e}")
-
 
 # --- Background Bot Run ---
 def run_bot():
@@ -245,90 +252,15 @@ def run_bot():
 def on_startup():
     threading.Thread(target=run_bot, daemon=True).start()
 
+# ==========================================
+# အပိုင်း (၂) : FastAPI Health Check (Render အတွက်သာ)
+# ==========================================
+# (Proxy အပိုင်းများ ဖြုတ်ချလိုက်ပါပြီ။)
 
-# ==========================================
-# အပိုင်း (၂) : FastAPI Reverse Proxy (Max Bypass)
-# ==========================================
+@app.get("/")
+def root_check():
+    return {"status": "online", "message": "Bot is running perfectly!"}
 
 @app.get("/ping")
 def health_check():
     return {"status": "alive"}
-
-@app.get("/login")
-async def login_and_set_cookie(token: str):
-    try:
-        response = supabase.table("sessions").select("cookie_value").eq("token", token).execute()
-        if not response.data:
-            return {"Error": "Token အမှား (သို့) သက်တမ်းကုန်သွားပါပြီ။"}
-            
-        raw_cookie = response.data[0]["cookie_value"].strip()
-        clean_cookie = re.split(r'[\t\s]+', raw_cookie)[-1]
-        
-        redirect = RedirectResponse(url="/")
-        redirect.set_cookie(
-            key="__Secure-next-auth.session-token",
-            value=clean_cookie,
-            httponly=True,
-            secure=True,
-            samesite="lax"
-        )
-        return redirect
-    except Exception as e:
-        return {"System_Error": str(e), "Error_Type": str(type(e))}
-
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"])
-async def reverse_proxy(request: Request, path: str):
-    url = f"{TARGET_URL}/{path}"
-    if request.url.query:
-        url += f"?{request.url.query}"
-        
-    # Anti-Snitch: Render မှ သတင်းပေးသည့် Headers များကို ဖယ်ရှားပစ်ခြင်း
-    forbidden_headers = [
-        "x-forwarded-for", "x-forwarded-proto", "x-forwarded-port",
-        "x-real-ip", "cf-connecting-ip", "true-client-ip", "x-render-host",
-        "host", "accept-encoding"
-    ]
-    
-    clean_headers = {}
-    for k, v in request.headers.items():
-        if k.lower() not in forbidden_headers:
-            clean_headers[k] = v
-            
-    # လူအစစ် Browser ကဲ့သို့ Headers များ အတင်းတပ်ဆင်ခြင်း
-    clean_headers["host"] = "chatgpt.com"
-    clean_headers["origin"] = TARGET_URL
-    clean_headers["referer"] = f"{TARGET_URL}/"
-    clean_headers["sec-ch-ua"] = '"Chromium";v="120", "Google Chrome";v="120", "Not-A.Brand";v="99"'
-    clean_headers["sec-ch-ua-mobile"] = "?0"
-    clean_headers["sec-ch-ua-platform"] = '"Windows"'
-    clean_headers["sec-fetch-dest"] = "document"
-    clean_headers["sec-fetch-mode"] = "navigate"
-    clean_headers["sec-fetch-site"] = "none"
-    clean_headers["sec-fetch-user"] = "?1"
-    clean_headers["upgrade-insecure-requests"] = "1"
-        
-    body = await request.body()
-    
-    try:
-        # Browser Spoofing (Chrome 120 အစစ်ကဲ့သို့ ချိတ်ဆက်ခြင်း)
-        async with AsyncSession(impersonate="chrome120") as client:
-            resp = await client.request(
-                method=request.method,
-                url=url,
-                headers=clean_headers,
-                data=body,
-                allow_redirects=False,
-                timeout=30
-            )
-            
-        res_headers = dict(resp.headers)
-        for h in ["content-encoding", "content-length", "transfer-encoding"]:
-            res_headers.pop(h, None)
-            
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=res_headers
-        )
-    except Exception as e:
-        return Response(content=f"Proxy Fetch Error: {str(e)}", status_code=500)
