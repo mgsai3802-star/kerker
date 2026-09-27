@@ -1,6 +1,6 @@
 """
-Jio Gemini Activation Scanner - TELEGRAM BOT & RENDER EDITION
-Flow: Telegram Command (/run) → All Panels → Online Devices → Unique Numbers → Process Links & Send to Telegram
+Jio Gemini Activation Scanner - TELEGRAM BOT & RENDER EDITION (FULL CODE)
+Flow: Telegram Command (/run, /addpanel, /listpanels) → Read panels.txt → Online Devices → Unique Numbers → Process Links & Send to Telegram
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from urllib.parse import unquote
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Flask
 import telebot
-
 import requests
 
 # ==================== TELEGRAM & WEB SERVER CONFIG ====================
@@ -55,82 +54,18 @@ def configured_timezone() -> ZoneInfo:
 
 TIMEZONE = configured_timezone()
 
-# ==================== ALL PANELS (DECODED FROM NETLIFY URLS) ====================
-FIREBASE_PANELS = [
-    ("https://cep10hui-default-rtdb.firebaseio.com", "https://cep10hui-default-rtdb.firebaseio.com"),
-    ("https://tinobiggan-default-rtdb.firebaseio.com", "https://tinobiggan-default-rtdb.firebaseio.com"),
-    ("https://atifgndu-default-rtdb.firebaseio.com", "https://atifgndu-default-rtdb.firebaseio.com"),
-    ("https://jsisbeuve-default-rtdb.firebaseio.com", "https://jsisbeuve-default-rtdb.firebaseio.com"),
-    ("https://fir-27c9e-default-rtdb.firebaseio.com", "AizAsyA7EOpeZLDxPAYcS2_nb1J2ZKr4TNCgp6Q"),
-    ("https://rupesh-6c5e5-default-rtdb.firebaseio.com", "AizAsyAFML11FrkfFMx0c4hOYqaCKUNVj5f8XhA"),
-    ("https://desi-742d2-default-rtdb.firebaseio.com", "https://desi-742d2-default-rtdb.firebaseio.com"),
-    ("https://santosh-8-default-rtdb.firebaseio.com", "https://santosh-8-default-rtdb.firebaseio.com"),
-    ("https://yqhw2-fb47-default-rtdb.firebaseio.com", "AizAsyAdvY2CkMHoY3Ww_ah6b0pFdNKNTHKZnypUY"),
-    ("https://ikka-83d65-default-rtdb.firebaseio.com", "https://ikka-83d65-default-rtdb.firebaseio.com"),
-    ("https://master-panel-6bcfc-default-rtdb.firebaseio.com", "https://master-panel-6bcfc-default-rtdb.firebaseio.com"),
-    ("https://landelle-20855-default-rtdb.firebaseio.com", "https://landelle-20855-default-rtdb.firebaseio.com"),
-    ("https://autobot7-214ee-default-rtdb.firebaseio.com", "https://autobot7-214ee-default-rtdb.firebaseio.com"),
-    ("https://shilpa-e712a-default-rtdb.firebaseio.com", "https://shilpa-e712a-default-rtdb.firebaseio.com"),
-    ("https://dath-da88a-default-rtdb.firebaseio.com", "https://dath-da88a-default-rtdb.firebaseio.com"),
-    ("https://apkdir-default-rtdb.firebaseio.com", "https://apkdir-default-rtdb.firebaseio.com"),
-    ("https://apkpure-6eb6a-default-rtdb.firebaseio.com", "https://apkpure-6eb6a-default-rtdb.firebaseio.com"),
-    ("https://hdjdjdj-a73f2-default-rtdb.firebaseio.com", "https://hdjdjdj-a73f2-default-rtdb.firebaseio.com"),
-    ("https://yogeshbhaitumchuitya-default-rtdb.firebaseio.com", "https://yogeshbhaitumchuitya-default-rtdb.firebaseio.com"),
-    ("https://anvith6-9450e-default-rtdb.firebaseio.com", "https://anvith6-9450e-default-rtdb.firebaseio.com"),
-    ("https://jayma-9ce22-default-rtdb.firebaseio.com", "https://jayma-9ce22-default-rtdb.firebaseio.com"),
-    ("https://konaio-default-rtdb.firebaseio.com", "https://konaio-default-rtdb.firebaseio.com"),
-    ("https://kitter-34345-default-rtdb.firebaseio.com", "https://kitter-34345-default-rtdb.firebaseio.com"),
-    ("https://apkdir-f6fb9-default-rtdb.firebaseio.com", "https://apkdir-f6fb9-default-rtdb.firebaseio.com"),
-    ("https://vibe-d238e-default-rtdb.firebaseio.com", "https://vibe-d238e-default-rtdb.firebaseio.com"),
-    ("https://alienware-c11b0-default-rtdb.firebaseio.com", "https://alienware-c11b0-default-rtdb.firebaseio.com"),
-    ("https://csforme-dc64a-default-rtdb.firebaseio.com", "AizAsyCEk7GmmKKwJSCAjCDIxOa8AISQZyxy6bw"),
-    ("https://max-a-cbe29-default-rtdb.firebaseio.com", "AizAsyCQeygjNYLwmbf_ZC86gvRye7XBI-BIBawq"),
-    ("https://raaz-5287d-default-rtdb.firebaseio.com", "Hebdixnd"),
-    ("https://singhaan-6f199-default-rtdb.firebaseio.com", "AizAsyD-1Gvt2cmr0mv1x0K4V9vtjVMXyJVLAv"),
-    ("https://painislv-default-rtdb.firebaseio.com", "AizAsyCqnjDPgVCaE36q7N4HbdfUEB9FbluM8pDs"),
-    ("https://risho-d4c66-default-rtdb.firebaseio.com", "AizAsyBkccFcNJ-FfClxHMzrRAyropULYvexsW0"),
-    ("https://runjun-master-panel-default-rtdb.firebaseio.com", "AizAsyBawSxrOxhTZk7C2V0-LkcoyEs7n6y4msw"),
-    ("https://tinmn88-b7db5-default-rtdb.firebaseio.com", "AizAsyBDanswTNTm4-E7v4wCX-_WsQ0A8ZaDIf"),
-    ("https://e14turnament2-default-rtdb.firebaseio.com", "AizAsyBIJawvyJ8SHeZ14iLesyx4bAOr8EPGt"),
-    ("https://newspreding-default-rtdb.firebaseio.com", "AizAsyDsWt99EDO-HdTmG3U9tARSElpki13JWFo"),
-    ("https://bossbun-default-rtdb.firebaseio.com", "AizAsyBfqObM5HnK6khogyF4ytOX7E9N0e_lAQ"),
-    ("https://jpicku-47790-default-rtdb.firebaseio.com", "https://jpicku-47790-default-rtdb.firebaseio.com"),
-    ("https://shivalmpanel-eb3b7-default-rtdb.firebaseio.com", "https://shivalmpanel-eb3b7-default-rtdb.firebaseio.com"),
-    ("https://annu-f0207-default-rtdb.firebaseio.com", "https://annu-f0207-default-rtdb.firebaseio.com"),
-    ("https://strange-2e4aa-default-rtdb.firebaseio.com", "https://strange-2e4aa-default-rtdb.firebaseio.com"),
-    ("https://customer-support-5-default-rtdb.firebaseio.com", "https://customer-support-5-default-rtdb.firebaseio.com"),
-    ("https://gandhi-ji-1-default-rtdb.asia-southeast1.firebaseio.com", "https://gandhi-ji-1-default-rtdb.asia-southeast1.firebaseio.com"),
-    ("https://muajob-29c86-default-rtdb.firebaseio.com", "https://muajob-29c86-default-rtdb.firebaseio.com"),
-    ("https://totala-panel-default-rtdb.firebaseio.com", "https://totala-panel-default-rtdb.firebaseio.com"),
-    ("https://kingu-2dbb9-default-rtdb.firebaseio.com", "https://kingu-2dbb9-default-rtdb.firebaseio.com"),
-    ("https://rajabhaya-default-rtdb.firebaseio.com", "https://rajabhaya-default-rtdb.firebaseio.com"),
-    ("https://heisenberg-8c3da-default-rtdb.firebaseio.com", "https://heisenberg-8c3da-default-rtdb.firebaseio.com"),
-    ("https://customer-support-12e40-default-rtdb.firebaseio.com", "https://customer-support-12e40-default-rtdb.firebaseio.com"),
-    ("https://sada-bcbcd-default-rtdb.firebaseio.com", "https://sada-bcbcd-default-rtdb.firebaseio.com"),
-    ("https://bharat56-b6ee1-default-rtdb.firebaseio.com", "https://bharat56-b6ee1-default-rtdb.firebaseio.com"),
-    ("https://phone55-d7d89-default-rtdb.firebaseio.com", "https://phone55-d7d89-default-rtdb.firebaseio.com"),
-    ("https://e9turnament1-default-rtdb.firebaseio.com", "https://e9turnament1-default-rtdb.firebaseio.com"),
-    ("https://colana-84ce2-default-rtdb.firebaseio.com", "https://colana-84ce2-default-rtdb.firebaseio.com"),
-    ("https://hospital-14-default-rtdb.firebaseio.com", "https://hospital-14-default-rtdb.firebaseio.com"),
-    ("https://vdgsh-623ed-default-rtdb.firebaseio.com", "https://vdgsh-623ed-default-rtdb.firebaseio.com"),
-    ("https://arvind-c5b03-default-rtdb.firebaseio.com", "https://arvind-c5b03-default-rtdb.firebaseio.com"),
-    ("https://axisjames-default-rtdb.firebaseio.com", "https://axisjames-default-rtdb.firebaseio.com"),
-    ("https://mafiaaaa2oppp-default-rtdb.firebaseio.com", "AizAsyBl3179G60c2LzYPrbkp4tmuRKK_7H0_0g"),
-    ("https://niggasionic-default-rtdb.asia-southeast1.firebasedatabase.app", "https://niggasionic-default-rtdb.asia-southeast1.firebasedatabase.app"),
-    ("https://krijhjuiiccyy-default-rtdb.firebaseio.com", "https://krijhjuiiccyy-default-rtdb.firebaseio.com"),
-    ("https://youbabu-default-rtdb.firebaseio.com", "https://youbabu-default-rtdb.firebaseio.com"),
-    ("https://kali-1b217-default-rtdb.firebaseio.com", "https://kali-1b217-default-rtdb.firebaseio.com"),
-    ("https://sallu-9934f-default-rtdb.firebaseio.com", "https://sallu-9934f-default-rtdb.firebaseio.com"),
-    ("https://chinky-d92ab-default-rtdb.firebaseio.com", "https://chinky-d92ab-default-rtdb.firebaseio.com"),
-    ("https://loddysingh-6d511-default-rtdb.firebaseio.com", "https://loddysingh-6d511-default-rtdb.firebaseio.com"),
-    ("https://simadevi-f42fc-default-rtdb.firebaseio.com", "https://simadevi-f42fc-default-rtdb.firebaseio.com"),
-    ("https://olamigo-41620-default-rtdb.firebaseio.com", "https://olamigo-41620-default-rtdb.firebaseio.com"),
-    ("https://anup-f900e-default-rtdb.firebaseio.com", "https://anup-f900e-default-rtdb.firebaseio.com"),
-    ("https://bishnu-a0e01-default-rtdb.firebaseio.com", "https://bishnu-a0e01-default-rtdb.firebaseio.com"),
-    ("https://akmbro-be675-default-rtdb.asia-southeast1.firebasedatabase.app", "https://akmbro-be675-default-rtdb.asia-southeast1.firebasedatabase.app"),
-    ("https://hdhdusgsvshshshs-default-rtdb.firebaseio.com", "https://hdhdusgsvshshshs-default-rtdb.firebaseio.com"),
-    ("https://sastaapp-394cd-default-rtdb.firebaseio.com", "https://sastaapp-394cd-default-rtdb.firebaseio.com"),
-]
+# ==================== LOAD PANELS FROM PANELS.TXT ====================
+def load_panels_from_file():
+    panels = []
+    if os.path.exists("panels.txt"):
+        with open("panels.txt", "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    parts = line.split(",", 1)
+                    if len(parts) == 2:
+                        panels.append((parts[0].strip(), parts[1].strip()))
+    return panels
 
 MESSAGE_SCAN_LIMIT = 100
 OTP_TIMEOUT = 15
@@ -351,7 +286,7 @@ def get_activation(session: requests.Session) -> tuple[str, str]:
     except requests.RequestException:
         return "activation_api_failed", ""
 
-# ==================== TELEGRAM COMMAND HANDLER ====================
+# ==================== TELEGRAM COMMAND HANDLERS ====================
 
 @bot.message_handler(commands=['run'])
 def handle_run_command(message):
@@ -362,10 +297,56 @@ def handle_run_command(message):
     bot.reply_to(message, "🚀 စစ်ဆေးမှု စတင်နေပါပြီ ခဏစောင့်ပါ...")
     threading.Thread(target=main_process, args=(message.chat.id,), daemon=True).start()
 
+@bot.message_handler(commands=['addpanel'])
+def add_panel_command(message):
+    if message.chat.id != ADMIN_CHAT_ID:
+        bot.reply_to(message, "❌ ဤခလုတ်ကို အသုံးပြုခွင့် မရှိပါ။")
+        return
+    
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        bot.reply_to(message, "⚠️ ပုံစံမမှန်ပါ။ ဤကဲ့သို့ ပို့ပေးပါ:\n`/addpanel URL,KEY`", parse_mode="Markdown")
+        return
+    
+    panel_info = parts[1].strip()
+    if "," not in panel_info:
+        bot.reply_to(message, "⚠️ URL နှင့် Key ကြားတွင် ကော်မာ (`,`) ခံရန် မမေ့ပါနှင့်။")
+        return
+    
+    with open("panels.txt", "a", encoding="utf-8") as f:
+        f.write(panel_info + "\n")
+        
+    bot.reply_to(message, "✅ Panel အသစ်ကို `panels.txt` ထဲသို့ အောင်မြင်စွာ ထည့်သွင်းပြီးပါပြီ!")
+
+@bot.message_handler(commands=['listpanels'])
+def list_panels_command(message):
+    if message.chat.id != ADMIN_CHAT_ID:
+        bot.reply_to(message, "❌ ဤခလုတ်ကို အသုံးပြုခွင့် မရှိပါ။")
+        return
+        
+    panels = load_panels_from_file()
+    if not panels:
+        bot.reply_to(message, "📁 `panels.txt` ထဲတွင် Panel တစ်ခုမှ မရှိသေးပါ။")
+        return
+        
+    text = f"📋 <b>လက်ရှိ Panel စုစုပေါင်း ({len(panels)} ခု):</b>\n\n"
+    for idx, (url, key) in enumerate(panels[:15], start=1):
+        text += f"{idx}. <code>{url}</code>\n"
+        
+    if len(panels) > 15:
+        text += f"\n... နှင့် အခြား {len(panels) - 15} ခု ကျန်ရှိသေးသည်။"
+        
+    bot.reply_to(message, text, parse_mode="HTML")
+
 # ==================== MAIN PROCESS ====================
 
 def main_process(chat_id: int) -> int:
-    bot.send_message(chat_id, "🔍 STEP 1: Panels များကို စစ်ဆေးပြီး Online Devices များ စုဆောင်းနေပါပြီ...")
+    FIREBASE_PANELS = load_panels_from_file()
+    if not FIREBASE_PANELS:
+        bot.send_message(chat_id, "❌ `panels.txt` ဖိုင်ထဲတွင် Panel လင့်ခ်များ မတွေ့ပါ။ ကျေးဇူးပြု၍ `/addpanel` ဖြင့် သို့မဟုတ် `panels.txt` ထဲတွင် ထည့်ပေးပါ။")
+        return 1
+
+    bot.send_message(chat_id, f"🔍 STEP 1: `panels.txt` မှ Panel စုစုပေါင်း {len(FIREBASE_PANELS)} ခုကို စစ်ဆေးနေပါပြီ...")
     
     all_online_devices: dict[str, dict[str, Any]] = {}
     device_messages: dict[str, dict[str, dict[str, Any]]] = {}
@@ -450,12 +431,10 @@ def main_process(chat_id: int) -> int:
                     
         statuses[status] += 1
         
-        # ဖုန်းထဲသို့ ဖိုင်အဖြစ် Save မည့်အစား Telegram Bot မှ တိုက်ရိုက် လှမ်းပို့ပေးမည်
         if url:
             success_msg = f"✅ <b>Activation အောင်မြင်ပါသည်!</b>\n📱 ဖုန်းနံပါတ်: <code>{mobile}</code>\n🔗 လင့်ခ်: {url}"
             bot.send_message(chat_id, success_msg, parse_mode="HTML", disable_web_page_preview=True)
             
-    # FINAL SUMMARY
     summary_text = f"📊 <b>စစ်ဆေးမှု ပြီးဆုံးပါပြီ (FINAL SUMMARY)</b>\n\n"
     summary_text += f"📱 Online Devices : {len(all_online_devices)}\n"
     summary_text += f"🎯 Unique Numbers : {len(targets)}\n\n"
@@ -472,3 +451,4 @@ if __name__ == "__main__":
     t_web = threading.Thread(target=run_web, daemon=True)
     t_web.start()
     bot.infinity_polling(skip_pending=True)
+                      
