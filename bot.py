@@ -38,13 +38,19 @@ DEEP_FILTER_URL = (
 DEEP_FILTER_BIN = "/usr/local/bin/deep-filter"
 FALLBACK_BIN = "/tmp/deep-filter"
 
-# AI က သန့်စင်ပြီးသော လူ့အသံကို အသံမပျက်စေဘဲ ကြည်လင်ကျယ်လောင်စေမည့် Studio Mastering Filter
-STUDIO_MASTERING_FILTER = (
-    "highpass=f=90:poles=2,"
-    "equalizer=f=220:t=q:w=1.2:g=2,"
-    "equalizer=f=3200:t=q:w=1.4:g=3.5,"
-    "acompressor=threshold=-18dB:ratio=2.5:attack=15:release=200:makeup=5dB,"
-    "alimiter=limit=0.96"
+# အဆင့် ၁ တွင် မိုက်ခ်လေတိုးသံ (Wind Rumble & Mud) ကိုသာ ကွက်၍ဖယ်ရှားပြီး သီချင်းနှင့် လူသံကို မပျက်စီးစေသည့် Filter
+DEWIND_EXTRACT_FILTER = (
+    "highpass=f=150:poles=2,"
+    "equalizer=f=240:t=q:w=1.2:g=-4.5,"
+    "equalizer=f=2200:t=q:w=1.2:g=3.0,"
+    "equalizer=f=3800:t=q:w=1.4:g=2.5,"
+    "afftdn=nr=10:nf=-38:tn=1"
+)
+
+# နောက်ဆုံးအဆင့်တွင် အသံပျက်တောက်စေသော Compressor မသုံးဘဲ လူသံကြည်လင်စေရန် ညှိပေးသည့် Smooth Filter
+SMOOTH_MASTER_FILTER = (
+    "equalizer=f=2500:t=q:w=1.3:g=2.5,"
+    "alimiter=limit=0.96:attack=5:release=50"
 )
 
 # --- Render Web Service အတွက် Health Check Server ---
@@ -52,7 +58,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "DeepFilterNet3 AI Denoise Bot is running!", 200
+    return "Smooth Parallel AI Denoise Bot is running!", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -106,34 +112,34 @@ def check_cancelled(chat_id):
         raise CancelledError("လုပ်ဆောင်မှုကို ရပ်တန့်လိုက်ပါပြီ။")
 
 
-def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid):
+def ai_parallel_smooth_enhance(input_wav, output_wav, chat_id, msg_id, uid):
     """
-    DeepFilterNet3 AI (48kHz Full-Band) ဖြင့် အသံကို အပိုင်းလိုက် သန့်စင်ပြီး
-    အပိုင်းဆက်များ လုံးဝမပျက်တောက်စေရန် Crossfade ဖြင့် ချောမွေ့စွာ ပြန်ဆက်ပေးသည့် Function
+    နောက်ခံသီချင်းသံ မပျောက်စေဘဲ အသံပျက်တောက်မှု (Choppy) လုံးဝမဖြစ်စေရန်
+    Gentle AI (-a 14 dB, No Post-Filter) နှင့် Continuous De-Winded Track ကို
+    70% / 30% Parallel Mixing ပြုလုပ်ပေးသည့် Function
     """
     ai_bin = ensure_ai_engine()
-    audio_data, sample_rate = sf.read(input_wav, dtype='float32')
+    base_audio, sample_rate = sf.read(input_wav, dtype='float32')
 
-    if audio_data.ndim > 1:
-        audio_data = np.mean(audio_data, axis=1)
+    if base_audio.ndim > 1:
+        base_audio = np.mean(base_audio, axis=1)
 
-    total_samples = len(audio_data)
+    total_samples = len(base_audio)
     if total_samples == 0:
         raise ValueError("အသံဖိုင်ထဲတွင် အသံဒေတာ လုံးဝမပါဝင်ပါ။")
 
-    # အသံအရှည်အလိုက် အပိုင်း (Chunk) အရွယ်အစား သတ်မှတ်ခြင်း (၄ စက္ကန့်မှ ၁၀ စက္ကန့်အတွင်း)
-    target_chunk_sec = max(4.0, min(10.0, (total_samples / sample_rate) / 5.0))
+    # AI RNN State မပြတ်တောက်စေရန် အပိုင်း (Chunk) ကို ၈ စက္ကန့်မှ ၁၂ စက္ကန့်အထိ ခပ်ကြီးကြီး ယူမည်
+    target_chunk_sec = max(8.0, min(12.0, (total_samples / sample_rate) / 4.0))
     step_samples = int(sample_rate * target_chunk_sec)
-    # အပိုင်းတစ်ခုနှင့်တစ်ခုကြား အသံလုံးဝမထစ်စေရန် 0.4 စက္ကန့် Overlap Crossfade ထားမည်
-    overlap_samples = int(sample_rate * 0.4)
+    # အပိုင်းတစ်ခုနှင့်တစ်ခုကြား လုံးဝအဆက်အစပ် မသိသာစေရန် 1.0 စက္ကန့် Overlap ထားမည်
+    overlap_samples = int(sample_rate * 1.0)
 
     chunk_work_dir = os.path.join(TEMP_DIR, f"{uid}_chunks")
     chunk_out_dir = os.path.join(TEMP_DIR, f"{uid}_ai_out")
     os.makedirs(chunk_work_dir, exist_ok=True)
     os.makedirs(chunk_out_dir, exist_ok=True)
 
-    # ရလဒ်သိမ်းမည့် Array
-    final_audio = np.zeros(total_samples, dtype=np.float32)
+    ai_audio = np.zeros(total_samples, dtype=np.float32)
     weight_sum = np.zeros(total_samples, dtype=np.float32)
 
     starts = list(range(0, total_samples, step_samples))
@@ -145,7 +151,7 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
             check_cancelled(chat_id)
 
             end = min(start + step_samples + overlap_samples, total_samples)
-            raw_chunk = audio_data[start:end]
+            raw_chunk = base_audio[start:end]
             chunk_len = len(raw_chunk)
 
             if chunk_len == 0:
@@ -155,20 +161,19 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
             chunk_in_path = os.path.join(chunk_work_dir, chunk_filename)
             chunk_out_path = os.path.join(chunk_out_dir, chunk_filename)
 
-            # DeepFilterNet3 အတွက် 16-bit PCM WAV အဖြစ် သိမ်းဆည်းခြင်း
             sf.write(chunk_in_path, raw_chunk, sample_rate, subtype='PCM_16')
 
-            # DeepFilterNet3 AI ဖြင့် လေသံနှင့် ဆူညံသံများကို သန့်စင်ခြင်း
+            # အရေးကြီးချက် - အသံပျက်တောက်စေသော "--pf" ကို လုံးဝမသုံးတော့ပါ။
+            # "-a 14" (Max 14dB reduction) သုံးထားသဖြင့် နောက်ခံသီချင်းသံနှင့် စကားသံ လုံးဝမပြတ်တောက်တော့ပါ။
             ai_cmd = [
                 ai_bin,
                 "-D",
-                "--pf",
+                "-a", "14",
                 "-o", chunk_out_dir,
                 chunk_in_path
             ]
             res = subprocess.run(ai_cmd, capture_output=True, text=True)
             if res.returncode != 0 or not os.path.exists(chunk_out_path):
-                # Fallback: --pf flag မပါဘဲ ထပ်မံစမ်းသပ်ခြင်း
                 fallback_cmd = [ai_bin, "-D", "-o", chunk_out_dir, chunk_in_path]
                 res2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
                 if res2.returncode != 0 or not os.path.exists(chunk_out_path):
@@ -178,29 +183,28 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
             if cleaned_chunk.ndim > 1:
                 cleaned_chunk = np.mean(cleaned_chunk, axis=1)
 
-            # မူရင်းအရှည်နှင့် တူညီအောင် ညှိခြင်း
             if len(cleaned_chunk) > chunk_len:
                 cleaned_chunk = cleaned_chunk[:chunk_len]
             elif len(cleaned_chunk) < chunk_len:
                 cleaned_chunk = np.pad(cleaned_chunk, (0, chunk_len - len(cleaned_chunk)))
 
-            # Smooth Crossfade Window တည်ဆောက်ခြင်း (အသံပျက်တောက်မှု လုံးဝမဖြစ်စေရန်)
+            # Cosine (Hann-style) Smooth Crossfade Window တည်ဆောက်ခြင်း
             window = np.ones(chunk_len, dtype=np.float32)
             fade_len = min(overlap_samples, chunk_len // 2)
             if start > 0 and fade_len > 0:
-                window[:fade_len] = np.linspace(0.0, 1.0, fade_len, dtype=np.float32)
+                t = np.linspace(0.0, np.pi, fade_len, dtype=np.float32)
+                window[:fade_len] = 0.5 * (1.0 - np.cos(t))
             if end < total_samples and fade_len > 0:
-                window[-fade_len:] = np.linspace(1.0, 0.0, fade_len, dtype=np.float32)
+                t = np.linspace(0.0, np.pi, fade_len, dtype=np.float32)
+                window[-fade_len:] = 0.5 * (1.0 + np.cos(t))
 
-            final_audio[start:end] += cleaned_chunk * window
+            ai_audio[start:end] += cleaned_chunk * window
             weight_sum[start:end] += window
 
-            # ပြီးစီးပြီးသား Chunk ဖိုင်များကို ချက်ချင်းဖျက်ခြင်း
             for p in [chunk_in_path, chunk_out_path]:
                 if os.path.exists(p):
                     os.remove(p)
 
-            # အမှန်တကယ် ပြီးစီးမှု ရာခိုင်နှုန်း (%) တွက်ချက်ခြင်း
             percent = int(((idx + 1) / total_chunks) * 100)
             now = time.time()
 
@@ -209,25 +213,29 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
                 safe_edit_message(
                     chat_id,
                     msg_id,
-                    f"🧠 DeepFilterNet3 AI ဖြင့် အသံသန့်စင်နေပါသည်...\n{bar_str}"
+                    f"🎧 သီချင်းသံမပျက်စေဘဲ လေသံစစ်ထုတ်၍ လူသံမြှင့်တင်နေပါသည်...\n{bar_str}"
                 )
                 last_edit_time = now
 
-        # Crossfade အလေးချိန်ဖြင့် ပြန်စား၍ ချောမွေ့သော အသံဖိုင် ထုတ်ယူခြင်း
         nonzero = weight_sum > 1e-6
-        final_audio[nonzero] /= weight_sum[nonzero]
+        ai_audio[nonzero] /= weight_sum[nonzero]
 
-        # Peak Normalization (လူသံ ပိုမိုပေါ်လွင်စေရန်)
-        max_val = np.max(np.abs(final_audio))
+        # Studio Parallel Mixing:
+        # 70% AI Cleaned Voice + 30% De-Winded Continuous Base Audio
+        # ဤနည်းဖြင့် နောက်ခံသီချင်းသံ လုံးဝမပျောက်သလို စကားသံလည်း လုံးဝမပျက်တောက်တော့ဘဲ ပိုမိုကြည်လင်လာမည်
+        blended_audio = (0.70 * ai_audio) + (0.30 * base_audio)
+
+        # Peak Normalization (အသံအကျယ်ဆုံးနှင့် အကြည်လင်ဆုံးဖြစ်စေရန်)
+        max_val = np.max(np.abs(blended_audio))
         if max_val > 0:
-            final_audio = (final_audio / max_val) * 0.95
+            blended_audio = (blended_audio / max_val) * 0.95
 
-        sf.write(output_wav, final_audio, sample_rate, subtype='PCM_16')
+        sf.write(output_wav, blended_audio, sample_rate, subtype='PCM_16')
 
     finally:
         shutil.rmtree(chunk_work_dir, ignore_errors=True)
         shutil.rmtree(chunk_out_dir, ignore_errors=True)
-        del audio_data, final_audio, weight_sum
+        del base_audio, ai_audio, weight_sum
         gc.collect()
 
 
@@ -269,18 +277,18 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၁ - DeepFilterNet3 အတွက် 48,000 Hz Full-Band WAV အဖြစ် ဆွဲထုတ်ခြင်း
-        current_step = "FFmpeg ဖြင့် 48kHz Studio WAV ဆွဲထုတ်ခြင်း"
+        # အဆင့် ၁ - လေတိုးသံ (Wind Rumble) ကို EQ ဖြင့် အရင်စစ်ထုတ်ပြီး 48kHz WAV ဆွဲထုတ်ခြင်း
+        current_step = "FFmpeg ဖြင့် လေတိုးသံ Frequency စစ်ထုတ်ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "🔄 48kHz Studio အသံလမ်းကြောင်းကို ဆွဲထုတ်နေပါသည်..."
+            "🔄 မိုက်ခ်လေတိုးသံ Frequency များကို စစ်ထုတ်နေပါသည်..."
         )
 
         extract_cmd = [
             "ffmpeg", "-y", "-i", input_file,
             "-vn",
-            "-af", "highpass=f=90:poles=2",
+            "-af", DEWIND_EXTRACT_FILTER,
             "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "1",
             "-loglevel", "error", raw_wav
         ]
@@ -290,15 +298,15 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၂ - DeepFilterNet3 AI ဖြင့် သန့်စင်ခြင်း (Live % Progress)
-        current_step = "DeepFilterNet3 AI ဖြင့် အသံသန့်စင်ခြင်း"
+        # အဆင့် ၂ - Parallel Smooth AI Blending (Live % Progress)
+        current_step = "Parallel AI Voice Boosting ပြုလုပ်ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            f"🧠 DeepFilterNet3 AI ဖြင့် အသံသန့်စင်နေပါသည်...\n{make_progress_bar(0)}"
+            f"🎧 သီချင်းသံမပျက်စေဘဲ လေသံစစ်ထုတ်၍ လူသံမြှင့်တင်နေပါသည်...\n{make_progress_bar(0)}"
         )
 
-        ai_enhance_with_smooth_progress(
+        ai_parallel_smooth_enhance(
             raw_wav, clean_wav,
             chat_id=chat_id,
             msg_id=status_msg.message_id,
@@ -307,12 +315,12 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၃ - Studio Voice Mastering ထည့်၍ မူရင်း Format အတိုင်း ပြန်ပို့ခြင်း
-        current_step = "Studio Voice Mastering နှင့် ဖိုင်ပြန်ပို့ခြင်း"
+        # အဆင့် ၃ - Smooth Mastering ဖြင့် မူရင်း Format အတိုင်း ပြန်ပို့ခြင်း
+        current_step = "ဖိုင်ပြန်ပေါင်းခြင်းနှင့် ပေးပို့ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "📤 100% ပြီးစီးပါပြီ! ကြည်လင်သန့်စင်ပြီးသော ဖိုင်ကို ပြန်ပို့ပေးနေပါသည်..."
+            "📤 100% ပြီးစီးပါပြီ! ချောမွေ့ကြည်လင်သော ဖိုင်ကို ပြန်ပို့ပေးနေပါသည်..."
         )
 
         if content_type in ['video', 'video_note']:
@@ -320,7 +328,7 @@ def process_single_job(job):
             merge_cmd = [
                 "ffmpeg", "-y", "-i", input_file, "-i", clean_wav,
                 "-c:v", "copy",
-                "-af", STUDIO_MASTERING_FILTER,
+                "-af", SMOOTH_MASTER_FILTER,
                 "-c:a", "aac", "-b:a", "192k",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
                 "-loglevel", "error", output_file
@@ -332,7 +340,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_video(
                     chat_id, f,
-                    caption="✨ DeepFilterNet3 AI (48kHz Studio) ဖြင့် ဆူညံသံများကို ဖယ်ရှားပြီး လူစကားသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ နောက်ခံသီချင်းနှင့် စကားသံ မပျက်တောက်စေဘဲ လေသံလျှော့ချ၍ လူသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -341,7 +349,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.ogg")
             ogg_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", STUDIO_MASTERING_FILTER,
+                "-af", SMOOTH_MASTER_FILTER,
                 "-c:a", "libopus", "-b:a", "64k",
                 "-loglevel", "error", output_file
             ]
@@ -352,7 +360,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_voice(
                     chat_id, f,
-                    caption="✨ DeepFilterNet3 AI (48kHz Studio) ဖြင့် ဆူညံသံများကို ဖယ်ရှားပြီး လူစကားသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ နောက်ခံသီချင်းနှင့် စကားသံ မပျက်တောက်စေဘဲ လေသံလျှော့ချ၍ လူသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -361,7 +369,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.mp3")
             mp3_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", STUDIO_MASTERING_FILTER,
+                "-af", SMOOTH_MASTER_FILTER,
                 "-c:a", "libmp3lame", "-b:a", "192k",
                 "-loglevel", "error", output_file
             ]
@@ -372,7 +380,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_audio(
                     chat_id, f,
-                    caption="✨ DeepFilterNet3 AI (48kHz Studio) ဖြင့် ဆူညံသံများကို ဖယ်ရှားပြီး လူစကားသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ နောက်ခံသီချင်းနှင့် စကားသံ မပျက်တောက်စေဘဲ လေသံလျှော့ချ၍ လူသံကို ကြည်လင်စွာ မြှင့်တင်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -437,11 +445,11 @@ def send_welcome(message):
         cancelled_users.discard(chat_id)
 
     welcome_text = (
-        "👋 မင်္ဂလာပါ! **DeepFilterNet3 Studio AI Voice Cleaner Bot** မှ ကြိုဆိုပါတယ်။\n\n"
+        "👋 မင်္ဂလာပါ! **Smooth Parallel AI Voice & Wind Cleaner Bot** မှ ကြိုဆိုပါတယ်။\n\n"
         "📹 **Video ဖိုင်**\n"
         "🎵 **Audio (MP3/WAV) ဖိုင်**\n"
         "🎤 **Voice Message**\n\n"
-        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ **48kHz DeepFilterNet3 AI Engine** ဖြင့် လေသံနှင့် အပြင်ဆူညံသံများကို အသံမပျက်စေဘဲ ကြည်တောက်ရှင်းနေအောင် သန့်စင်ပေးပါမည်။"
+        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ **Parallel Mixing စနစ်** ဖြင့် နောက်ခံသီချင်းသံနှင့် စကားသံများ လုံးဝမပျက်တောက်စေဘဲ လေတိုးသံကို လျှော့ချကာ လူစကားပြောသံကို ကြည်လင်စွာ မြှင့်တင်ပေးပါမည်။"
     )
     bot.send_message(
         chat_id,
@@ -503,12 +511,12 @@ def handle_media(message):
     if is_busy:
         status_msg = bot.reply_to(
             message,
-            f"⏳ ရှေ့ကဖိုင်ကို AI ဖြင့် အရင်လုပ်ဆောင်နေပါသည်။\n"
+            f"⏳ ရှေ့ကဖိုင်ကို အရင်လုပ်ဆောင်နေပါသည်။\n"
             f"📋 သင့်ဖိုင်ကို အလှည့်ကျစာရင်း **(Queue #{waiting_count})** တွင် ထည့်သွင်းထားပါသည်...",
             parse_mode="Markdown"
         )
     else:
-        status_msg = bot.reply_to(message, "📥 ဖိုင်ကို လက်ခံရရှိပါပြီ။ AI ဖြင့် စတင်သန့်စင်နေပါသည်...")
+        status_msg = bot.reply_to(message, "📥 ဖိုင်ကို လက်ခံရရှိပါပြီ။ စတင်သန့်စင်နေပါသည်...")
 
     job_queue.put({
         'message': message,
@@ -517,12 +525,9 @@ def handle_media(message):
 
 
 if __name__ == "__main__":
-    # ၁။ Render Port Scan ချက်ချင်း အောင်မြင်စေရန် Web Server ကို အရင်ဆုံး စတင်မည်
     Thread(target=run_web_server, daemon=True).start()
-    # ၂။ AI Engine အဆင်သင့်ဖြစ်စေရန် စစ်ဆေးမည်
     ensure_ai_engine()
-    # ၃။ Queue Worker ကို စတင်မည်
     Thread(target=queue_worker, daemon=True).start()
-    print("🤖 DeepFilterNet3 Studio AI Bot is polling...")
+    print("🤖 Smooth Parallel AI Voice Bot is polling...")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
     
