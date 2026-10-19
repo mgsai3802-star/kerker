@@ -159,7 +159,6 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
             sf.write(chunk_in_path, raw_chunk, sample_rate, subtype='PCM_16')
 
             # DeepFilterNet3 AI ဖြင့် လေသံနှင့် ဆူညံသံများကို သန့်စင်ခြင်း
-            # -D (Delay Compensation), --pf (Post-Filter for strong wind/noise removal)
             ai_cmd = [
                 ai_bin,
                 "-D",
@@ -169,7 +168,11 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
             ]
             res = subprocess.run(ai_cmd, capture_output=True, text=True)
             if res.returncode != 0 or not os.path.exists(chunk_out_path):
-                raise RuntimeError(f"AI Engine Error: {res.stderr.strip()}")
+                # Fallback: --pf flag မပါဘဲ ထပ်မံစမ်းသပ်ခြင်း
+                fallback_cmd = [ai_bin, "-D", "-o", chunk_out_dir, chunk_in_path]
+                res2 = subprocess.run(fallback_cmd, capture_output=True, text=True)
+                if res2.returncode != 0 or not os.path.exists(chunk_out_path):
+                    raise RuntimeError(f"AI Engine Error: {res.stderr.strip() or res2.stderr.strip()}")
 
             cleaned_chunk, _ = sf.read(chunk_out_path, dtype='float32')
             if cleaned_chunk.ndim > 1:
@@ -197,7 +200,7 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
                 if os.path.exists(p):
                     os.remove(p)
 
-            # အမှန်တကယ် ပြီးစီးမှု ရာခိုင်နှုန်း (% ) တွက်ချက်ခြင်း
+            # အမှန်တကယ် ပြီးစီးမှု ရာခိုင်နှုန်း (%) တွက်ချက်ခြင်း
             percent = int(((idx + 1) / total_chunks) * 100)
             now = time.time()
 
@@ -211,7 +214,7 @@ def ai_enhance_with_smooth_progress(input_wav, output_wav, chat_id, msg_id, uid)
                 last_edit_time = now
 
         # Crossfade အလေးချိန်ဖြင့် ပြန်စား၍ ချောမွေ့သော အသံဖိုင် ထုတ်ယူခြင်း
-         nonzero = weight_sum > 1e-6
+        nonzero = weight_sum > 1e-6
         final_audio[nonzero] /= weight_sum[nonzero]
 
         # Peak Normalization (လူသံ ပိုမိုပေါ်လွင်စေရန်)
@@ -522,3 +525,4 @@ if __name__ == "__main__":
     Thread(target=queue_worker, daemon=True).start()
     print("🤖 DeepFilterNet3 Studio AI Bot is polling...")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
+    
