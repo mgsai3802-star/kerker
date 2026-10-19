@@ -1,5 +1,4 @@
 pyTelegramBotAPI
-noisereduce
 soundfile
 numpy
 flask
