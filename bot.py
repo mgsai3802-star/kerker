@@ -22,25 +22,20 @@ bot = telebot.TeleBot(BOT_TOKEN, threaded=True, num_threads=2)
 TEMP_DIR = "temp_files"
 os.makedirs(TEMP_DIR, exist_ok=True)
 
-# --- တစ်ခုပြီးမှတစ်ခု လုပ်ဆောင်ရန် Queue နှင့် Lock စနစ် ---
 job_queue = queue.Queue()
 state_lock = Lock()
 current_job_chat_id = None
 cancel_current_job = False
 cancelled_users = set()
 
-# လူစကားမပြောချိန်တွင် အပြင်သံကို ပိတ်ထားပြီး (agate)၊ လူစကားပြောသံကိုသာ သီးသန့်ချဲ့ပေးမည့် Filter
-VOICE_ISOLATION_FILTER = (
-    "highpass=f=120:poles=2,"
-    "lowpass=f=6000:poles=2,"
-    "agate=threshold=0.02:ratio=4:attack=10:release=180,"
-    "equalizer=f=280:t=q:w=1.0:g=3,"
-    "equalizer=f=2800:t=q:w=1.2:g=6,"
-    "acompressor=threshold=-18dB:ratio=3:attack=5:release=100:makeup=7dB,"
+# အသံကို လုံးဝ မပျက်တောက်စေဘဲ ချောမွေ့ကြည်လင်စေမည့် Filter (Smooth & Natural)
+SMOOTH_VOICE_FILTER = (
+    "highpass=f=80:poles=2,"
+    "lowpass=f=7000:poles=2,"
+    "acompressor=threshold=-20dB:ratio=2.5:attack=10:release=150:makeup=4dB,"
     "alimiter=limit=0.95"
 )
 
-# --- Render Web Service အတွက် Health Check Server ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -80,8 +75,8 @@ def check_cancelled(chat_id):
         raise CancelledError("လုပ်ဆောင်မှုကို ရပ်တန့်လိုက်ပါပြီ။")
 
 
-def reduce_audio_noise_with_progress(input_wav, output_wav, chat_id, msg_id):
-    """Dual-Pass Noise Reduction နှင့် Smart Voice Gate ဖြင့် အပြင်သံကို အပြတ်ရှင်းပေးသည့် Function"""
+def reduce_audio_noise_smooth(input_wav, output_wav, chat_id, msg_id):
+    """အသံမပျက်တောက်ဘဲ ချောမွေ့စွာ (Smooth) Noise ဖျောက်ပေးသည့် Function"""
     audio_data, sample_rate = sf.read(input_wav, dtype='float32')
 
     if audio_data.ndim > 1:
@@ -91,9 +86,9 @@ def reduce_audio_noise_with_progress(input_wav, output_wav, chat_id, msg_id):
     if total_samples == 0:
         raise ValueError("အသံဖိုင်ထဲတွင် အသံဒေတာ လုံးဝမပါဝင်ပါ။")
 
-    # Render RAM မပြည့်စေရန် ၆ စက္ကန့်စာ အပိုင်းလိုက် ခွဲထုတ်မည်
+    # Render RAM အဆင်ပြေစေရန် ၆ စက္ကန့်စာ အပိုင်းလိုက်ခွဲမည်
     chunk_size = max(sample_rate * 2, min(sample_rate * 6, total_samples // 4))
-    pad = int(sample_rate * 0.25)
+    pad = int(sample_rate * 0.3)
 
     cleaned_chunks = []
     last_edit_time = 0
@@ -107,40 +102,22 @@ def reduce_audio_noise_with_progress(input_wav, output_wav, chat_id, msg_id):
 
         chunk = audio_data[pad_start:pad_end]
 
-        # Pass 1: ပြောင်းလဲနေသော အပြင်ဆူညံသံများ (ကားသံ၊ လူသံ) ကို 95% ဖယ်ရှားခြင်း
-        pass1 = nr.reduce_noise(
+        # လူ့စကားသံ မပျက်စီးစေရန် prop_decrease ကို 0.75 ဖြင့် သဘာဝကျကျ ဖျောက်မည်
+        smoothed_chunk = nr.reduce_noise(
             y=chunk,
             sr=sample_rate,
             stationary=False,
-            prop_decrease=0.95,
-            time_constant_s=1.0,
-            freq_mask_smooth_hz=250,
-            time_mask_smooth_ms=50,
+            prop_decrease=0.75,
+            time_constant_s=1.5,
+            freq_mask_smooth_hz=500,
+            time_mask_smooth_ms=100,
             n_fft=1024,
             n_jobs=1
         )
-
-        check_cancelled(chat_id)
-
-        # Pass 2: ကျန်ရှိနေသော တသမတ်တည်း ဆူညံသံ (လေသံ၊ ပန်ကာသံ) ကို ထပ်မံဖယ်ရှားခြင်း
-        pass2 = nr.reduce_noise(
-            y=pass1,
-            sr=sample_rate,
-            stationary=True,
-            prop_decrease=0.90,
-            n_fft=1024,
-            n_jobs=1
-        )
-
-        # Smart Voice Gate: လူစကားမပြောသည့် အပိုင်းများရှိ လက်ကျန် Noise ကို နှိမ်ချခြင်း
-        abs_signal = np.abs(pass2)
-        noise_floor = np.percentile(abs_signal, 60) * 1.5
-        gate_mask = np.where(abs_signal < noise_floor, 0.15, 1.0).astype(np.float32)
-        gated_chunk = pass2 * gate_mask
 
         trim_left = start - pad_start
-        trim_right = len(gated_chunk) - (pad_end - end)
-        cleaned_chunks.append(gated_chunk[trim_left:trim_right])
+        trim_right = len(smoothed_chunk) - (pad_end - end)
+        cleaned_chunks.append(smoothed_chunk[trim_left:trim_right])
 
         percent = int((end / total_samples) * 100)
         now = time.time()
@@ -150,13 +127,12 @@ def reduce_audio_noise_with_progress(input_wav, output_wav, chat_id, msg_id):
             safe_edit_message(
                 chat_id,
                 msg_id,
-                f"🎧 အပြင်ဆူညံသံများကို အထူးသန့်စင်နေပါသည်...\n{bar_str}"
+                f"🎧 အသံကို ချောမွေ့ကြည်လင်အောင် ပြုလုပ်နေပါသည်...\n{bar_str}"
             )
             last_edit_time = now
 
     final_audio = np.concatenate(cleaned_chunks)
 
-    # လူစကားသံကို အမြင့်ဆုံးအဆင့်သို့ ဆွဲတင်ခြင်း (Peak Normalization)
     max_val = np.max(np.abs(final_audio))
     if max_val > 0:
         final_audio = (final_audio / max_val) * 0.95
@@ -168,7 +144,6 @@ def reduce_audio_noise_with_progress(input_wav, output_wav, chat_id, msg_id):
 
 
 def process_single_job(job):
-    """Queue ထဲမှ ဖိုင်တစ်ဖိုင်ချင်းစီကို အစအဆုံး လုပ်ဆောင်ပေးသည့် Function"""
     global current_job_chat_id, cancel_current_job
 
     message = job['message']
@@ -177,7 +152,6 @@ def process_single_job(job):
     content_type = message.content_type
     media = getattr(message, content_type)
 
-    # Queue စောင့်နေစဉ် Cancel နှိပ်ထားပါက ကျော်သွားမည်
     if chat_id in cancelled_users:
         safe_edit_message(chat_id, status_msg.message_id, "🛑 **လုပ်ဆောင်မှုကို ပယ်ဖျက်လိုက်ပါပြီ။**")
         return
@@ -206,19 +180,17 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၂ - FFmpeg ဖြင့် အသံထုတ်ယူပြီး ပထမအဆင့် FFT Denoise ပြုလုပ်ခြင်း
         current_step = "FFmpeg ဖြင့် အသံလမ်းကြောင်း ဆွဲထုတ်ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "🔄 အသံလမ်းကြောင်းကို ဆွဲထုတ်ပြီး ပထမအဆင့် သန့်စင်နေပါသည်..."
+            "🔄 အသံလမ်းကြောင်းကို ဆွဲထုတ်နေပါသည်..."
         )
 
-        # 16000 Hz သည် လူ့စကားသံအတွက် အကြည်လင်ဆုံးနှင့် Render RAM အသက်သာဆုံး ဖြစ်သည်
         extract_cmd = [
             "ffmpeg", "-y", "-i", input_file,
             "-vn",
-            "-af", "highpass=f=120,lowpass=f=6000,afftdn=nr=20:nf=-35:tn=1",
+            "-af", "highpass=f=80,lowpass=f=7000",
             "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             "-loglevel", "error", raw_wav
         ]
@@ -228,15 +200,14 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၃ - Dual-Pass Python Denoise နှင့် Smart Gate
-        current_step = "Background Noise အထူးဖယ်ရှားခြင်း"
+        current_step = "Background Noise ဖယ်ရှားခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            f"🎧 အပြင်ဆူညံသံများကို အထူးသန့်စင်နေပါသည်...\n{make_progress_bar(0)}"
+            f"🎧 အသံကို ချောမွေ့ကြည်လင်အောင် ပြုလုပ်နေပါသည်...\n{make_progress_bar(0)}"
         )
 
-        reduce_audio_noise_with_progress(
+        reduce_audio_noise_smooth(
             raw_wav, clean_wav,
             chat_id=chat_id,
             msg_id=status_msg.message_id
@@ -244,12 +215,11 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        # အဆင့် ၄ - Vocal Compressor + EQ ထည့်ပြီး ပြန်ပို့ခြင်း
-        current_step = "လူစကားသံ ချဲ့ခြင်းနှင့် ဖိုင်ပြန်ပို့ခြင်း"
+        current_step = "ဖိုင်ပြန်ပေါင်းခြင်းနှင့် ပေးပို့ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "📤 100% ပြီးစီးပါပြီ! လူသံမြှင့်တင်ပြီးသော ဖိုင်ကို ပြန်ပို့ပေးနေပါသည်..."
+            "📤 100% ပြီးစီးပါပြီ! သန့်စင်ပြီးသော ဖိုင်ကို ပြန်ပို့ပေးနေပါသည်..."
         )
 
         if content_type in ['video', 'video_note']:
@@ -257,7 +227,7 @@ def process_single_job(job):
             merge_cmd = [
                 "ffmpeg", "-y", "-i", input_file, "-i", clean_wav,
                 "-c:v", "copy",
-                "-af", VOICE_ISOLATION_FILTER,
+                "-af", SMOOTH_VOICE_FILTER,
                 "-c:a", "aac", "-b:a", "160k",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
                 "-loglevel", "error", output_file
@@ -269,7 +239,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_video(
                     chat_id, f,
-                    caption="✅ အပြင်ဆူညံသံများကို အထူးဖယ်ရှားပြီး လူစကားသံကို သီးသန့်မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -278,7 +248,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.ogg")
             ogg_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", VOICE_ISOLATION_FILTER,
+                "-af", SMOOTH_VOICE_FILTER,
                 "-c:a", "libopus", "-b:a", "64k",
                 "-loglevel", "error", output_file
             ]
@@ -289,7 +259,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_voice(
                     chat_id, f,
-                    caption="✅ အပြင်ဆူညံသံများကို အထူးဖယ်ရှားပြီး လူစကားသံကို သီးသန့်မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -298,7 +268,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.mp3")
             mp3_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", VOICE_ISOLATION_FILTER,
+                "-af", SMOOTH_VOICE_FILTER,
                 "-c:a", "libmp3lame", "-b:a", "160k",
                 "-loglevel", "error", output_file
             ]
@@ -309,7 +279,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_audio(
                     chat_id, f,
-                    caption="✅ အပြင်ဆူညံသံများကို အထူးဖယ်ရှားပြီး လူစကားသံကို သီးသန့်မြှင့်တင်ပေးထားပါသည်။",
+                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -340,7 +310,6 @@ def process_single_job(job):
             bot.reply_to(message, f"❌ Error ({current_step}): {error_detail[:300]}", reply_markup=get_main_keyboard())
 
     finally:
-        # ဖိုင်တစ်ခု ပြီးဆုံးတိုင်း Temp ဖိုင်များနှင့် RAM ကို အပြည့်အဝ ရှင်းလင်းမည်
         for path in [input_file, raw_wav, clean_wav, output_file]:
             if path and os.path.exists(path):
                 try:
@@ -351,12 +320,10 @@ def process_single_job(job):
             current_job_chat_id = None
             cancel_current_job = False
         gc.collect()
-        # နောက်ဖိုင်တစ်ခု မစတင်မီ Render CPU/RAM အနားရစေရန် ၁ စက္ကန့် စောင့်မည်
         time.sleep(1)
 
 
 def queue_worker():
-    """Queue ထဲရှိ ဖိုင်များကို တစ်ခုပြီးမှတစ်ခု အစဉ်လိုက် လုပ်ဆောင်ပေးမည့် Background Worker"""
     while True:
         job = job_queue.get()
         try:
@@ -367,7 +334,6 @@ def queue_worker():
             job_queue.task_done()
 
 
-# --- Start 🔄 နှင့် /start Command Handler ---
 @bot.message_handler(commands=['start', 'help'])
 @bot.message_handler(func=lambda msg: msg.text == "Start 🔄")
 def send_welcome(message):
@@ -376,12 +342,11 @@ def send_welcome(message):
         cancelled_users.discard(chat_id)
 
     welcome_text = (
-        "👋 မင်္ဂလာပါ! **Ultra Voice Isolation & Noise Remover Bot** မှ ကြိုဆိုပါတယ်။\n\n"
+        "👋 မင်္ဂလာပါ! **Smooth Voice & Noise Cleaner Bot** မှ ကြိုဆိုပါတယ်။\n\n"
         "📹 **Video ဖိုင်**\n"
         "🎵 **Audio (MP3/WAV) ဖိုင်**\n"
         "🎤 **Voice Message**\n\n"
-        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ အပြင်ဆူညံသံများကို **Dual-Pass စနစ်ဖြင့် အပြတ်ရှင်းပြီး** လူစကားပြောသံကို သီးသန့် ဆွဲထုတ်ပေးပါမယ်။\n\n"
-        "🛡️ *ဖိုင်အများကြီး တစ်ပြိုင်နက်ပို့လျှင်လည်း Server Error မတက်စေရန် တစ်ခုပြီးမှတစ်ခု အလှည့်ကျ လုပ်ဆောင်ပေးပါသည်။*"
+        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ ဆူညံသံများကို ဖယ်ရှားပေးရင်း လူစကားသံများ **ပျက်တောက်မှုမရှိဘဲ အလွန်ချောမွေ့ကြည်လင်နေစေရန်** ပြုလုပ်ပေးပါမယ်။"
     )
     bot.send_message(
         chat_id,
@@ -391,7 +356,6 @@ def send_welcome(message):
     )
 
 
-# --- Cancel ❌ နှင့် /cancel Command Handler ---
 @bot.message_handler(commands=['cancel'])
 @bot.message_handler(func=lambda msg: msg.text == "Cancel ❌")
 def handle_cancel(message):
@@ -420,7 +384,6 @@ def handle_cancel(message):
         )
 
 
-# --- Video / Audio / Voice Handler (Queue ထဲသို့ ထည့်သွင်းခြင်း) ---
 @bot.message_handler(content_types=['video', 'audio', 'voice', 'video_note'])
 def handle_media(message):
     chat_id = message.chat.id
@@ -444,13 +407,12 @@ def handle_media(message):
         status_msg = bot.reply_to(
             message,
             f"⏳ ရှေ့ကဖိုင်ကို အရင်လုပ်ဆောင်နေပါသည်။\n"
-            f"📋 သင့်ဖိုင်ကို အလှည့်ကျစာရင်း **(Queue #{waiting_count})** တွင် ထည့်သွင်းထားပါသည်... ရှေ့ဖိုင်ပြီးသည်နှင့် အလိုအလျောက် စတင်ပါမည်။",
+            f"📋 သင့်ဖိုင်ကို အလှည့်ကျစာရင်း **(Queue #{waiting_count})** တွင် ထည့်သွင်းထားပါသည်...",
             parse_mode="Markdown"
         )
     else:
         status_msg = bot.reply_to(message, "📥 ဖိုင်ကို လက်ခံရရှိပါပြီ။ စတင်လုပ်ဆောင်နေပါသည်...")
 
-    # Queue ထဲသို့ အစဉ်လိုက် ထည့်သွင်းခြင်း
     job_queue.put({
         'message': message,
         'status_msg': status_msg
@@ -458,9 +420,8 @@ def handle_media(message):
 
 
 if __name__ == "__main__":
-    # Flask Web Server နှင့် Queue Worker Thread တို့ကို စတင်မည်
     Thread(target=run_web_server, daemon=True).start()
     Thread(target=queue_worker, daemon=True).start()
-    print("🤖 Sequential Queue Denoise Bot is polling...")
+    print("🤖 Smooth Voice Denoise Bot is polling...")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
-    
+
