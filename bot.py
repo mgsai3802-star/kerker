@@ -11,7 +11,9 @@ import numpy as np
 import telebot
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 import soundfile as sf
-import noisereduce as nr
+import torch
+
+from df.enhance import init_df, enhance, load_audio, save_audio
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -28,19 +30,15 @@ current_job_chat_id = None
 cancel_current_job = False
 cancelled_users = set()
 
-# လေသံ (Wind/Hiss) များကို အဓိက ဖြတ်ထုတ်ပေးပြီး အသံချောမွေ့စေမည့် Professional Filter
-WIND_REMOVAL_FILTER = (
-    "highpass=f=200:poles=2,"          # လေသံနှင့် အောက်ခြေတိုးသံများကို အဓိက ဖြတ်ထုတ်ခြင်း
-    "lowpass=f=6500:poles=2,"           # အလွန်မြင့်လွန်းသော ဆူညံသံများကို ဖြတ်ခြင်း
-    "acompressor=threshold=-22dB:ratio=3:attack=10:release=120:makeup=5dB,"
-    "alimiter=limit=0.95"
-)
+print("🤖 DeepFilterNet AI Model ကို စတင်ဖန်တီးနေပါသည်...")
+ai_model, df_state, _ = init_df()
+print("✅ AI Model အဆင်သင့် ဖြစ်ပါပြီ။")
 
 app = Flask(__name__)
 
 @app.route('/')
 def health_check():
-    return "Denoise Bot is running!", 200
+    return "AI Denoise Bot is running!", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
@@ -75,9 +73,14 @@ def check_cancelled(chat_id):
         raise CancelledError("လုပ်ဆောင်မှုကို ရပ်တန့်လိုက်ပါပြီ။")
 
 
-def reduce_wind_and_noise(input_wav, output_wav, chat_id, msg_id):
-    """လေသံဆူညံမှု ပြင်းထန်သော အသံများကို ချောမွေ့စွာ ဖယ်ရှားပေးသည့် Function"""
-    audio_data, sample_rate = sf.read(input_wav, dtype='float32')
+def enhance_audio_with_progress(input_wav, output_wav, chat_id, msg_id):
+    """AI Model ဖြင့် အသံကို အပိုင်းလိုက်ခွဲ၍ Real-time % တက်အောင် ပြုလုပ်ပေးသည့် Function"""
+    sr = df_state.sr()
+    audio_data, file_sr = sf.read(input_wav, dtype='float32')
+    
+    if file_sr != sr:
+        # Sample rate မတူပါက FFmpeg ဖြင့် အရင်ချိန်ညှိပြီးသားမို့ ဒီမှာ တိုက်ရိုက်သုံးနိုင်သည်
+        pass
 
     if audio_data.ndim > 1:
         audio_data = np.mean(audio_data, axis=1)
@@ -86,59 +89,46 @@ def reduce_wind_and_noise(input_wav, output_wav, chat_id, msg_id):
     if total_samples == 0:
         raise ValueError("အသံဖိုင်ထဲတွင် အသံဒေတာ လုံးဝမပါဝင်ပါ။")
 
-    chunk_size = max(sample_rate * 2, min(sample_rate * 6, total_samples // 4))
-    pad = int(sample_rate * 0.3)
-
-    cleaned_chunks = []
+    # AI Model အတွက် တစ်ကြိမ်လျှင် ၅ စက္ကန့်စာ အပိုင်းလိုက် ခွဲထုတ်မည်
+    chunk_samples = sr * 5
+    enhanced_chunks = []
     last_edit_time = 0
 
-    for start in range(0, total_samples, chunk_size):
+    total_chunks = (total_samples + chunk_samples - 1) // chunk_samples
+
+    for i, start in enumerate(range(0, total_samples, chunk_samples)):
         check_cancelled(chat_id)
+        end = min(start + chunk_samples, total_samples)
+        
+        chunk = audio_data[start:end]
+        
+        # PyTorch Tensor သို့ ပြောင်းလဲခြင်း
+        tensor_chunk = torch.from_numpy(chunk).unsqueeze(0)
+        
+        # AI Enhancement ပြုလုပ်ခြင်း
+        with torch.no_grad():
+            enhanced_tensor = enhance(ai_model, df_state, tensor_chunk)
+            
+        enhanced_np = enhanced_tensor.squeeze(0).numpy()
+        enhanced_chunks.append(enhanced_np)
 
-        end = min(start + chunk_size, total_samples)
-        pad_start = max(0, start - pad)
-        pad_end = min(total_samples, end + pad)
-
-        chunk = audio_data[pad_start:pad_end]
-
-        # လေသံ (Wind) ဆူညံမှုများအတွက် stationary=False ဖြင့် အသေးစိတ်ဖျောက်မည်
-        cleaned_chunk = nr.reduce_noise(
-            y=chunk,
-            sr=sample_rate,
-            stationary=False,
-            prop_decrease=0.85,
-            time_constant_s=1.0,
-            freq_mask_smooth_hz=400,
-            time_mask_smooth_ms=80,
-            n_fft=1024,
-            n_jobs=1
-        )
-
-        trim_left = start - pad_start
-        trim_right = len(cleaned_chunk) - (pad_end - end)
-        cleaned_chunks.append(cleaned_chunk[trim_left:trim_right])
-
-        percent = int((end / total_samples) * 100)
+        # ပြီးစီးမှု ရာခိုင်နှုန်း (% ) တွက်ချက်ခြင်း
+        percent = int(((i + 1) / total_chunks) * 100)
         now = time.time()
 
-        if now - last_edit_time >= 2.0 or percent == 100:
+        if now - last_edit_time >= 1.5 or percent == 100:
             bar_str = make_progress_bar(percent)
             safe_edit_message(
                 chat_id,
                 msg_id,
-                f"🌪️ လေသံနှင့် အပြင်ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{bar_str}"
+                f"🧠 AI ဖြင့် လေသံနှင့် ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{bar_str}"
             )
             last_edit_time = now
 
-    final_audio = np.concatenate(cleaned_chunks)
+    final_audio = np.concatenate(enhanced_chunks)
+    sf.write(output_wav, final_audio, sr)
 
-    max_val = np.max(np.abs(final_audio))
-    if max_val > 0:
-        final_audio = (final_audio / max_val) * 0.95
-
-    sf.write(output_wav, final_audio, sample_rate)
-
-    del audio_data, cleaned_chunks, final_audio
+    del audio_data, enhanced_chunks, final_audio
     gc.collect()
 
 
@@ -179,19 +169,17 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        current_step = "FFmpeg ဖြင့် လေသံကြိမ်နှုန်းများ ဖယ်ရှားခြင်း"
+        current_step = "FFmpeg ဖြင့် အသံထုတ်ယူခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "🔄 လေသံကြိမ်နှုန်းများကို ဖယ်ထုတ်နေပါသည်..."
+            "🔄 AI ဖြင့် သန့်စင်ရန် အသံကို ပြင်ဆင်နေပါသည်..."
         )
 
-        # လေသံ (Wind) အများစုဖြစ်တတ်သော အောက်ခြေကြိမ်နှုန်းများကို highpass=200Hz ဖြင့် အဓိက ဖြတ်မည်
+        sr = df_state.sr()
         extract_cmd = [
             "ffmpeg", "-y", "-i", input_file,
-            "-vn",
-            "-af", "highpass=f=200,lowpass=f=6500,afftdn=nr=25:nf=-30:tn=1",
-            "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+            "-vn", "-acodec", "pcm_s16le", "-ar", str(sr), "-ac", "1",
             "-loglevel", "error", raw_wav
         ]
         res = subprocess.run(extract_cmd, capture_output=True, text=True)
@@ -200,14 +188,14 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        current_step = "Noise ဖယ်ရှားခြင်း"
+        current_step = "AI Denoise ပြုလုပ်ခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            f"🌪️ လေသံနှင့် အပြင်ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{make_progress_bar(0)}"
+            f"🧠 AI ဖြင့် လေသံနှင့် ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{make_progress_bar(0)}"
         )
 
-        reduce_wind_and_noise(
+        enhance_audio_with_progress(
             raw_wav, clean_wav,
             chat_id=chat_id,
             msg_id=status_msg.message_id
@@ -226,9 +214,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.mp4")
             merge_cmd = [
                 "ffmpeg", "-y", "-i", input_file, "-i", clean_wav,
-                "-c:v", "copy",
-                "-af", WIND_REMOVAL_FILTER,
-                "-c:a", "aac", "-b:a", "160k",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
                 "-loglevel", "error", output_file
             ]
@@ -239,7 +225,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_video(
                     chat_id, f,
-                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
+                    caption="✨ DeepFilterNet AI ဖြင့် လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -248,7 +234,6 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.ogg")
             ogg_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", WIND_REMOVAL_FILTER,
                 "-c:a", "libopus", "-b:a", "64k",
                 "-loglevel", "error", output_file
             ]
@@ -259,7 +244,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_voice(
                     chat_id, f,
-                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
+                    caption="✨ DeepFilterNet AI ဖြင့် လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -268,8 +253,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.mp3")
             mp3_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", WIND_REMOVAL_FILTER,
-                "-c:a", "libmp3lame", "-b:a", "160k",
+                "-c:a", "libmp3lame", "-b:a", "192k",
                 "-loglevel", "error", output_file
             ]
             res = subprocess.run(mp3_cmd, capture_output=True, text=True)
@@ -279,7 +263,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_audio(
                     chat_id, f,
-                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
+                    caption="✨ DeepFilterNet AI ဖြင့် လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -342,11 +326,11 @@ def send_welcome(message):
         cancelled_users.discard(chat_id)
 
     welcome_text = (
-        "👋 မင်္ဂလာပါ! **Wind & Noise Remover Bot** မှ ကြိုဆိုပါတယ်။\n\n"
+        "👋 မင်္ဂလာပါ! **AI Denoise Bot (Live Progress %)** မှ ကြိုဆိုပါတယ်။\n\n"
         "📹 **Video ဖိုင်**\n"
         "🎵 **Audio (MP3/WAV) ဖိုင်**\n"
         "🎤 **Voice Message**\n\n"
-        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ လေသံဆူညံမှုပြင်းထန်သော အသံများကို High-pass Filter ဖြင့် အဓိက ဖြတ်ထုတ်ပေးပါမယ်။"
+        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါသည်။ AI ဖြင့် လေသံများကို အပြတ်ရှင်းလင်းပေးမည်ဖြစ်ပြီး လုပ်ဆောင်နေစဉ် ရာခိုင်နှုန်း `%` တိုက်ရိုက်ပြသပေးပါမည်။"
     )
     bot.send_message(
         chat_id,
@@ -406,12 +390,12 @@ def handle_media(message):
     if is_busy:
         status_msg = bot.reply_to(
             message,
-            f"⏳ ရှေ့ကဖိုင်ကို အရင်လုပ်ဆောင်နေပါသည်။\n"
+            f"⏳ ရှေ့ကဖိုင်ကို AI ဖြင့် အရင်လုပ်ဆောင်နေပါသည်။\n"
             f"📋 သင့်ဖိုင်ကို အလှည့်ကျစာရင်း **(Queue #{waiting_count})** တွင် ထည့်သွင်းထားပါသည်...",
             parse_mode="Markdown"
         )
     else:
-        status_msg = bot.reply_to(message, "📥 ဖိုင်ကို လက်ခံရရှိပါပြီ။ စတင်လုပ်ဆောင်နေပါသည်...")
+        status_msg = bot.reply_to(message, "📥 ဖိုင်ကို လက်ခံရရှိပါပြီ။ AI ဖြင့် စတင်သန့်စင်နေပါသည်...")
 
     job_queue.put({
         'message': message,
@@ -422,6 +406,6 @@ def handle_media(message):
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
     Thread(target=queue_worker, daemon=True).start()
-    print("🤖 Wind & Noise Remover Bot is polling...")
+    print("🤖 AI Denoise Bot with Live % is polling...")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
-
+    
