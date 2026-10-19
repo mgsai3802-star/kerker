@@ -1,5 +1,7 @@
+torch
+torchaudio
+deepfilternet
 pyTelegramBotAPI
-noisereduce
-soundfile
-numpy
 flask
+numpy
+soundfile
