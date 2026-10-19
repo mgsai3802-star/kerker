@@ -1,3 +1,6 @@
 pyTelegramBotAPI
+noisereduce
+librosa
+soundfile
 flask
-requests
+
