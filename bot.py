@@ -28,11 +28,11 @@ current_job_chat_id = None
 cancel_current_job = False
 cancelled_users = set()
 
-# အသံကို လုံးဝ မပျက်တောက်စေဘဲ ချောမွေ့ကြည်လင်စေမည့် Filter (Smooth & Natural)
-SMOOTH_VOICE_FILTER = (
-    "highpass=f=80:poles=2,"
-    "lowpass=f=7000:poles=2,"
-    "acompressor=threshold=-20dB:ratio=2.5:attack=10:release=150:makeup=4dB,"
+# လေသံ (Wind/Hiss) များကို အဓိက ဖြတ်ထုတ်ပေးပြီး အသံချောမွေ့စေမည့် Professional Filter
+WIND_REMOVAL_FILTER = (
+    "highpass=f=200:poles=2,"          # လေသံနှင့် အောက်ခြေတိုးသံများကို အဓိက ဖြတ်ထုတ်ခြင်း
+    "lowpass=f=6500:poles=2,"           # အလွန်မြင့်လွန်းသော ဆူညံသံများကို ဖြတ်ခြင်း
+    "acompressor=threshold=-22dB:ratio=3:attack=10:release=120:makeup=5dB,"
     "alimiter=limit=0.95"
 )
 
@@ -75,8 +75,8 @@ def check_cancelled(chat_id):
         raise CancelledError("လုပ်ဆောင်မှုကို ရပ်တန့်လိုက်ပါပြီ။")
 
 
-def reduce_audio_noise_smooth(input_wav, output_wav, chat_id, msg_id):
-    """အသံမပျက်တောက်ဘဲ ချောမွေ့စွာ (Smooth) Noise ဖျောက်ပေးသည့် Function"""
+def reduce_wind_and_noise(input_wav, output_wav, chat_id, msg_id):
+    """လေသံဆူညံမှု ပြင်းထန်သော အသံများကို ချောမွေ့စွာ ဖယ်ရှားပေးသည့် Function"""
     audio_data, sample_rate = sf.read(input_wav, dtype='float32')
 
     if audio_data.ndim > 1:
@@ -86,7 +86,6 @@ def reduce_audio_noise_smooth(input_wav, output_wav, chat_id, msg_id):
     if total_samples == 0:
         raise ValueError("အသံဖိုင်ထဲတွင် အသံဒေတာ လုံးဝမပါဝင်ပါ။")
 
-    # Render RAM အဆင်ပြေစေရန် ၆ စက္ကန့်စာ အပိုင်းလိုက်ခွဲမည်
     chunk_size = max(sample_rate * 2, min(sample_rate * 6, total_samples // 4))
     pad = int(sample_rate * 0.3)
 
@@ -102,22 +101,22 @@ def reduce_audio_noise_smooth(input_wav, output_wav, chat_id, msg_id):
 
         chunk = audio_data[pad_start:pad_end]
 
-        # လူ့စကားသံ မပျက်စီးစေရန် prop_decrease ကို 0.75 ဖြင့် သဘာဝကျကျ ဖျောက်မည်
-        smoothed_chunk = nr.reduce_noise(
+        # လေသံ (Wind) ဆူညံမှုများအတွက် stationary=False ဖြင့် အသေးစိတ်ဖျောက်မည်
+        cleaned_chunk = nr.reduce_noise(
             y=chunk,
             sr=sample_rate,
             stationary=False,
-            prop_decrease=0.75,
-            time_constant_s=1.5,
-            freq_mask_smooth_hz=500,
-            time_mask_smooth_ms=100,
+            prop_decrease=0.85,
+            time_constant_s=1.0,
+            freq_mask_smooth_hz=400,
+            time_mask_smooth_ms=80,
             n_fft=1024,
             n_jobs=1
         )
 
         trim_left = start - pad_start
-        trim_right = len(smoothed_chunk) - (pad_end - end)
-        cleaned_chunks.append(smoothed_chunk[trim_left:trim_right])
+        trim_right = len(cleaned_chunk) - (pad_end - end)
+        cleaned_chunks.append(cleaned_chunk[trim_left:trim_right])
 
         percent = int((end / total_samples) * 100)
         now = time.time()
@@ -127,7 +126,7 @@ def reduce_audio_noise_smooth(input_wav, output_wav, chat_id, msg_id):
             safe_edit_message(
                 chat_id,
                 msg_id,
-                f"🎧 အသံကို ချောမွေ့ကြည်လင်အောင် ပြုလုပ်နေပါသည်...\n{bar_str}"
+                f"🌪️ လေသံနှင့် အပြင်ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{bar_str}"
             )
             last_edit_time = now
 
@@ -180,17 +179,18 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        current_step = "FFmpeg ဖြင့် အသံလမ်းကြောင်း ဆွဲထုတ်ခြင်း"
+        current_step = "FFmpeg ဖြင့် လေသံကြိမ်နှုန်းများ ဖယ်ရှားခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            "🔄 အသံလမ်းကြောင်းကို ဆွဲထုတ်နေပါသည်..."
+            "🔄 လေသံကြိမ်နှုန်းများကို ဖယ်ထုတ်နေပါသည်..."
         )
 
+        # လေသံ (Wind) အများစုဖြစ်တတ်သော အောက်ခြေကြိမ်နှုန်းများကို highpass=200Hz ဖြင့် အဓိက ဖြတ်မည်
         extract_cmd = [
             "ffmpeg", "-y", "-i", input_file,
             "-vn",
-            "-af", "highpass=f=80,lowpass=f=7000",
+            "-af", "highpass=f=200,lowpass=f=6500,afftdn=nr=25:nf=-30:tn=1",
             "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
             "-loglevel", "error", raw_wav
         ]
@@ -200,14 +200,14 @@ def process_single_job(job):
 
         check_cancelled(chat_id)
 
-        current_step = "Background Noise ဖယ်ရှားခြင်း"
+        current_step = "Noise ဖယ်ရှားခြင်း"
         safe_edit_message(
             chat_id,
             status_msg.message_id,
-            f"🎧 အသံကို ချောမွေ့ကြည်လင်အောင် ပြုလုပ်နေပါသည်...\n{make_progress_bar(0)}"
+            f"🌪️ လေသံနှင့် အပြင်ဆူညံသံများကို ဖယ်ရှားနေပါသည်...\n{make_progress_bar(0)}"
         )
 
-        reduce_audio_noise_smooth(
+        reduce_wind_and_noise(
             raw_wav, clean_wav,
             chat_id=chat_id,
             msg_id=status_msg.message_id
@@ -227,7 +227,7 @@ def process_single_job(job):
             merge_cmd = [
                 "ffmpeg", "-y", "-i", input_file, "-i", clean_wav,
                 "-c:v", "copy",
-                "-af", SMOOTH_VOICE_FILTER,
+                "-af", WIND_REMOVAL_FILTER,
                 "-c:a", "aac", "-b:a", "160k",
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest",
                 "-loglevel", "error", output_file
@@ -239,7 +239,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_video(
                     chat_id, f,
-                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
+                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -248,7 +248,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.ogg")
             ogg_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", SMOOTH_VOICE_FILTER,
+                "-af", WIND_REMOVAL_FILTER,
                 "-c:a", "libopus", "-b:a", "64k",
                 "-loglevel", "error", output_file
             ]
@@ -259,7 +259,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_voice(
                     chat_id, f,
-                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
+                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -268,7 +268,7 @@ def process_single_job(job):
             output_file = os.path.join(TEMP_DIR, f"{uid}_out.mp3")
             mp3_cmd = [
                 "ffmpeg", "-y", "-i", clean_wav,
-                "-af", SMOOTH_VOICE_FILTER,
+                "-af", WIND_REMOVAL_FILTER,
                 "-c:a", "libmp3lame", "-b:a", "160k",
                 "-loglevel", "error", output_file
             ]
@@ -279,7 +279,7 @@ def process_single_job(job):
             with open(output_file, 'rb') as f:
                 bot.send_audio(
                     chat_id, f,
-                    caption="✅ အသံကို ပျက်တောက်မှုမရှိဘဲ ချောမွေ့ကြည်လင်စွာ ပြုလုပ်ပေးထားပါသည်။",
+                    caption="✅ လေသံနှင့် ဆူညံသံများကို အပြည့်အဝ ဖယ်ရှားပေးထားပါသည်။",
                     reply_to_message_id=message.message_id,
                     reply_markup=get_main_keyboard()
                 )
@@ -342,11 +342,11 @@ def send_welcome(message):
         cancelled_users.discard(chat_id)
 
     welcome_text = (
-        "👋 မင်္ဂလာပါ! **Smooth Voice & Noise Cleaner Bot** မှ ကြိုဆိုပါတယ်။\n\n"
+        "👋 မင်္ဂလာပါ! **Wind & Noise Remover Bot** မှ ကြိုဆိုပါတယ်။\n\n"
         "📹 **Video ဖိုင်**\n"
         "🎵 **Audio (MP3/WAV) ဖိုင်**\n"
         "🎤 **Voice Message**\n\n"
-        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ ဆူညံသံများကို ဖယ်ရှားပေးရင်း လူစကားသံများ **ပျက်တောက်မှုမရှိဘဲ အလွန်ချောမွေ့ကြည်လင်နေစေရန်** ပြုလုပ်ပေးပါမယ်။"
+        "ကြိုက်နှစ်သက်ရာ ပေးပို့နိုင်ပါတယ်။ လေသံဆူညံမှုပြင်းထန်သော အသံများကို High-pass Filter ဖြင့် အဓိက ဖြတ်ထုတ်ပေးပါမယ်။"
     )
     bot.send_message(
         chat_id,
@@ -422,6 +422,6 @@ def handle_media(message):
 if __name__ == "__main__":
     Thread(target=run_web_server, daemon=True).start()
     Thread(target=queue_worker, daemon=True).start()
-    print("🤖 Smooth Voice Denoise Bot is polling...")
+    print("🤖 Wind & Noise Remover Bot is polling...")
     bot.infinity_polling(timeout=60, long_polling_timeout=30)
 
